@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16" />
+      <stop offset="50%" stop-color="#1e1b4b" />
+      <stop offset="100%" stop-color="#31104b" />
+    </linearGradient>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" />
+      <stop offset="50%" stop-color="#8b5cf6" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+    <linearGradient id="eyeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+    <linearGradient id="beakGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+    <linearGradient id="featherGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0.6" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background Shield Disc -->
+  <circle cx="64" cy="64" r="58" fill="url(#bgGrad)" stroke="url(#ringGrad)" stroke-width="4" />
+  <circle cx="64" cy="64" r="50" fill="none" stroke="#4338ca" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.6" />
+
+  <!-- Owl Feather Ears / Crest -->
+  <path d="M30 38 L48 48 L38 22 Z" fill="url(#featherGrad)" />
+  <path d="M98 38 L80 48 L90 22 Z" fill="url(#featherGrad)" />
+
+  <!-- Owl Head Visor -->
+  <path d="M32 46 C44 40 56 46 64 50 C72 46 84 40 96 46 C100 60 98 76 92 90 C84 104 74 110 64 110 C54 110 44 104 36 90 C30 76 28 60 32 46 Z" 
+        fill="#1e1b4b" stroke="#6366f1" stroke-width="2.5" />
+
+  <!-- Angular Eyebrow Ridge -->
+  <path d="M34 52 Q50 46 62 58 L64 60 L66 58 Q78 46 94 52" 
+        fill="none" stroke="#818cf8" stroke-width="3.5" stroke-linecap="round" />
+
+  <!-- Eye Sockets & Glowing Irises -->
+  <circle cx="48" cy="68" r="14" fill="#090d16" stroke="#4f46e5" stroke-width="2" />
+  <circle cx="48" cy="68" r="9" fill="url(#eyeGrad)" />
+  <circle cx="48" cy="68" r="4.5" fill="#090d16" />
+  <circle cx="46" cy="66" r="2" fill="#ffffff" opacity="0.9" />
+
+  <circle cx="80" cy="68" r="14" fill="#090d16" stroke="#4f46e5" stroke-width="2" />
+  <circle cx="80" cy="68" r="9" fill="url(#eyeGrad)" />
+  <circle cx="80" cy="68" r="4.5" fill="#090d16" />
+  <circle cx="78" cy="66" r="2" fill="#ffffff" opacity="0.9" />
+
+  <!-- Geometric Golden Beak -->
+  <polygon points="64,84 57,72 71,72" fill="url(#beakGrad)" />
+
+  <!-- Chest Cyber Chevrons -->
+  <path d="M52 92 L64 99 L76 92" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" opacity="0.75" />
+  <path d="M56 100 L64 105 L72 100" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" opacity="0.85" />
+</svg>

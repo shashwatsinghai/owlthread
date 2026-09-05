@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OwlThread Browser Extension Demo & Test Page</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #0b0f19;
+      color: #f1f5f9;
+      padding: 40px 20px;
+      line-height: 1.6;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #818cf8;
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+    .badge {
+      background: #312e81;
+      color: #a5b4fc;
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 600;
+      display: inline-block;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    }
+    .card h2 {
+      font-size: 18px;
+      color: #e2e8f0;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    p {
+      color: #94a3b8;
+      margin-bottom: 14px;
+    }
+    ul {
+      margin-left: 20px;
+      color: #cbd5e1;
+    }
+    li {
+      margin-bottom: 8px;
+    }
+    .chat-simulation {
+      background: #0f172a;
+      border-left: 4px solid #6366f1;
+      padding: 16px;
+      border-radius: 6px;
+      margin-top: 16px;
+    }
+    .chat-user {
+      font-weight: bold;
+      color: #38bdf8;
+      margin-bottom: 4px;
+    }
+    .chat-assistant {
+      font-weight: bold;
+      color: #a78bfa;
+      margin-bottom: 4px;
+      margin-top: 12px;
+    }
+    .btn {
+      background: #4f46e5;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .btn:hover {
+      background: #4338ca;
+    }
+  </style>
+</head>
+<body>
+  <h1>🦉 OwlThread Ambient Memory Extension Test</h1>
+  <div class="badge">Live Extension Verification Suite</div>
+
+  <div class="card">
+    <h2>🎯 What to Test on this Page</h2>
+    <p>When the OwlThread browser extension is loaded:</p>
+    <ul>
+      <li><strong>1. First-time Site Access Prompt:</strong> On load, a small interactive prompt card emerges from the bottom-right asking: <em>"Do you want to give access to save to memory?"</em></li>
+      <li><strong>2. Floating Owl Widget:</strong> In the bottom-right corner, an animated Owl icon with a glowing status beacon (🟢 reading, ⏸️ paused) is displayed.</li>
+      <li><strong>3. 3-Option Quick Action Menu:</strong> Click the Owl icon to see:
+        <ul>
+          <li>🌐 <strong>Save this address:</strong> Instantly snapshots current page URL, title, and article text.</li>
+          <li>⏸️ <strong>Stop reading / Resume:</strong> Toggles ambient reading on/off.</li>
+          <li>📝 <strong>Write a new note:</strong> Opens an inline composer where you can type notes and save straight to OwlThread!</li>
+        </ul>
+      </li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>💬 Interactive Live Chat & Streaming Simulator</h2>
+    <p>Test the new live chunking engine: type a message and press <kbd style="background:#334155;color:#f8fafc;padding:2px 6px;border-radius:4px;">Enter</kbd>, or click <em>Simulate AI Response</em> to see live output detection with zero data loss!</p>
+    
+    <div id="chat-stream-box" class="chat-simulation">
+      <div class="chat-user">You:</div>
+      <p id="last-user-msg" style="color: #cbd5e1; font-style: italic;">(Type a message below to test live capture)</p>
+      
+      <div class="chat-assistant">Assistant:</div>
+      <p id="assistant-stream-target" data-message-author-role="assistant" style="color: #cbd5e1;">
+        OwlThread ambient reader is observing this page. Highlight text, type messages, or click simulate to stream new facts!
+      </p>
+    </div>
+
+    <div style="display: flex; gap: 10px; margin-top: 14px;">
+      <input type="text" id="live-chat-input" placeholder="Type a decision or note and press Enter..." style="flex: 1; background: #020617; border: 1px solid #475569; border-radius: 8px; color: #fff; padding: 10px 14px; font-size: 13px; outline: none;" />
+      <button id="live-send-btn" class="btn" style="background: #22c55e;">Send</button>
+      <button id="simulate-ai-btn" class="btn">Simulate AI Stream</button>
+    </div>
+
+    <script>
+      const chatInput = document.getElementById("live-chat-input");
+      const sendBtn = document.getElementById("live-send-btn");
+      const userMsgP = document.getElementById("last-user-msg");
+      const aiTarget = document.getElementById("assistant-stream-target");
+      const simBtn = document.getElementById("simulate-ai-btn");
+
+      sendBtn.addEventListener("click", () => {
+        if (chatInput.value.trim()) {
+          userMsgP.innerText = chatInput.value.trim();
+          chatInput.value = "";
+        }
+      });
+
+      chatInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && chatInput.value.trim()) {
+          userMsgP.innerText = chatInput.value.trim();
+        }
+      });
+
+      simBtn.addEventListener("click", () => {
+        aiTarget.innerText = "Generating response...";
+        const facts = [
+          "Settled Decision: All user profile avatars will be stored on AWS S3 with signed CloudFront URLs expiring in 15 minutes.",
+          "Business Rule: Subscription tiers will be $19/mo Starter, $49/mo Pro, and custom Enterprise contracts with net-30 terms.",
+          "Technical Architecture: Authentication will rely on JWT tokens with 15-minute expiry and rolling refresh tokens in HTTP-only cookies."
+        ];
+        const chosen = facts[Math.floor(Math.random() * facts.length)];
+        let idx = 0;
+        aiTarget.innerText = "";
+        const interval = setInterval(() => {
+          idx += 5;
+          aiTarget.innerText = chosen.slice(0, idx);
+          if (idx >= chosen.length) {
+            clearInterval(interval);
+          }
+        }, 80);
+      });
+    </script>
+  </div>
+
+  <div class="card">
+    <h2>🛠️ Extension Installation Instructions</h2>
+    <p>To load the extension into Chrome, Edge, or Brave:</p>
+    <ol style="margin-left: 20px; color: #cbd5e1;">
+      <li>Open your browser's extension page: <code>chrome://extensions</code> or <code>edge://extensions</code></li>
+      <li>Enable <strong>Developer mode</strong> (toggle in the top-right).</li>
+      <li>Click <strong>Load unpacked</strong>.</li>
+      <li>Select the folder: <code>c:\Users\AnshK\Downloads\OwlTherad\extension</code>.</li>
+      <li>Refresh this test page or any site to see the Owl assistant!</li>
+    </ol>
+  </div>
+</body>
+</html>

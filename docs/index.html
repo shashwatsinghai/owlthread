@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OwlThread - Ambient Memory for Builders</title>
+    <meta name="description" content="OwlThread is an ambient memory engine for builders who hate losing context.">
+    <link rel="stylesheet" href="style.css">
+    <!-- Google Fonts for a modern look (Inter or similar) -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="hero section fade-in">
+        <div class="container">
+            <div class="hero-content">
+                <div class="logo-emoji">🦉</div>
+                <h1 class="title">OwlThread</h1>
+                <h2 class="tagline">Ambient Memory for Builders</h2>
+                <p class="subtitle">OwlThread continuously captures your workflow, extracts vital context, and primes your environment so you never lose your train of thought again.</p>
+                <div class="cta-group">
+                    <a href="#quickstart" class="btn btn-primary">Get Started</a>
+                    <a href="https://github.com/owlthread/owlthread" class="btn btn-secondary">GitHub</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <section id="how-it-works" class="section fade-in">
+        <div class="container">
+            <h2 class="section-title">How It Works</h2>
+            <div class="steps-grid">
+                <div class="step-card">
+                    <div class="step-icon">🔍</div>
+                    <h3>1. Capture</h3>
+                    <p>Reads your workflow across browser, cursor, and clipboard silently in the background.</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-icon">🧠</div>
+                    <h3>2. Extract</h3>
+                    <p>Organizes raw context into a 4-quadrant memory system using local LLMs.</p>
+                </div>
+                <div class="step-card">
+                    <div class="step-icon">⚡</div>
+                    <h3>3. Prime</h3>
+                    <p>Delivers context-ready briefs on demand exactly when you need them.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="features" class="section fade-in">
+        <div class="container">
+            <h2 class="section-title">Features</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <h3>100% Free & Open-Source</h3>
+                    <p>No monthly subscriptions, no paywalls. Clone from GitHub and hack on it freely.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Fully Customizable Prompts</h3>
+                    <p>Tailor the extraction and priming logic directly from the UI to match your stack.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Zero API Keys Needed</h3>
+                    <p>Run completely offline with local Ollama models (Llama 3, DeepSeek-R1) or offline heuristics.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Browser Extension</h3>
+                    <p>Seamlessly tracks research and docs without breaking your flow.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>4-Quadrant Memory</h3>
+                    <p>Classifies context by urgency and relevance for smart retrieval.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Privacy-First</h3>
+                    <p>Everything lives locally in a SQLite database. Your data never leaves your machine.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Pluggable Connectors</h3>
+                    <p>Easily build plugins for GitHub, Cloudflare, or Jira using our simple Python interface.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Query & Primer Engine</h3>
+                    <p>State your task, get instant 1-click tailored context briefs for Cursor, Claude, or ChatGPT.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="architecture" class="section fade-in">
+        <div class="container">
+            <h2 class="section-title">Architecture</h2>
+            <div class="arch-diagram">
+                <pre><code>Browser / Cursor / Clipboard 
+         │
+         ▼
+[ Capture Server ] ──► [ Buffer Manager ]
+                              │
+                              ▼
+                      [ LLM Extractor ]
+                              │
+                              ▼
+                     [ SQLite Memory ]
+                              │
+                              ▼
+                      [ Primer Engine ]
+                              │
+                              ▼
+                          Clipboard</code></pre>
+            </div>
+        </div>
+    </section>
+
+    <section id="quickstart" class="section fade-in">
+        <div class="container">
+            <h2 class="section-title">Quick Start</h2>
+            <div class="code-block">
+                <pre><code># Install locally
+pip install -e .
+
+# Start the background daemon
+owlthread start
+
+# Load the browser extension and you're ready!</code></pre>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>Built for builders who hate losing context.</p>
+            <div class="footer-links">
+                <a href="https://github.com/owlthread/owlthread">GitHub</a>
+                <span>&bull;</span>
+                <span>MIT License</span>
+            </div>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

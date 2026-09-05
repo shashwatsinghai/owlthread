@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "owlthread"
+version = "0.1.0"
+description = "Universal Capture Engine for OwlThread"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "customtkinter>=5.2.0",
+    "pystray>=0.19.5",
+    "pillow>=10.0.0",
+    "pywin32>=306; platform_system=='Windows'",
+]
+
+[project.scripts]
+owlthread = "owlthread.cli:main"

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OwlThread Extension Test Bench</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 700px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #0f172a;
+      color: #e2e8f0;
+      line-height: 1.6;
+    }
+    h1 { color: #818cf8; }
+    .chat-container {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px;
+      margin: 20px 0;
+    }
+    .user-msg {
+      background: #312e81;
+      padding: 10px 14px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+    .ai-msg {
+      background: #334155;
+      padding: 10px 14px;
+      border-radius: 8px;
+    }
+    kbd {
+      background: #475569;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>OwlThread Capture Test Page</h1>
+  <p>To test capture: select some text on this page or press <kbd>Ctrl+Shift+O</kbd> to capture the entire conversation below.</p>
+
+  <div class="conversation-container chat-container">
+    <div class="chat-message user-msg">
+      <strong>User:</strong> How do we implement universal capture across IDEs, clipboard, CLI, and browser?
+    </div>
+    <div class="chat-message ai-msg">
+      <strong>Assistant:</strong> Build lightweight decoupled connectors using standard file offset tracking, polling background workers, and localhost HTTP receivers!
+    </div>
+  </div>
+</body>
+</html>
