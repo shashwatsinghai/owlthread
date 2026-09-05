@@ -187,15 +187,19 @@ class LLMClient:
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
         }
+        is_claude_5 = any(m in model_name.lower() for m in ["sonnet-5", "opus-5", "fable-5"])
         payload = {
             "model": model_name,
             "system": system_prompt,
             "messages": [
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if is_claude_5:
+            payload["thinking"] = {"type": "adaptive"}
+        else:
+            payload["temperature"] = temperature
 
         req = urllib.request.Request(
             url,
@@ -206,7 +210,8 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data["content"][0]["text"].strip()
+                text_blocks = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+                return "\n".join(text_blocks).strip()
         except urllib.error.HTTPError as err:
             err_msg = err.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"Anthropic API error (HTTP {err.code}): {err_msg or err.reason}")

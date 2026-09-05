@@ -51,6 +51,15 @@ class ExtractionPipeline:
         if not raw_text or not raw_text.strip():
             return []
 
+        is_instant = self.db.get_setting("instant_batch_mode", "false").lower() == "true"
+        if is_instant:
+            logger.info("Instant batch mode active. Batching and extracting capture immediately...")
+            return self.flush_and_extract_text_immediately(
+                raw_text=raw_text,
+                source_app=source_app,
+                project_name=project_name
+            )
+
         project_id = self.db.get_or_create_project(name=project_name, root_path=root_path)
         batch = self.buffer_manager.add_capture(
             project_id=project_id,

@@ -353,7 +353,33 @@ class OwlThreadDesktopApp(ctk.CTk):
             corner_radius=6,
             command=self._handle_flush_done,
         )
-        self.flush_btn.pack(fill="x", padx=8, pady=(0, 8))
+        self.flush_btn.pack(fill="x", padx=8, pady=(0, 6))
+
+        # Instant Batch Mode Toggle Switch
+        is_instant_init = self.db.get_setting("instant_batch_mode", "false").lower() == "true"
+        self.instant_batch_var = ctk.BooleanVar(value=is_instant_init)
+        self.instant_batch_switch = ctk.CTkSwitch(
+            status_frame,
+            text="⚡ Instant Batch",
+            font=FONT_SMALL,
+            variable=self.instant_batch_var,
+            onvalue=True,
+            offvalue=False,
+            progress_color=COLOR_SUCCESS,
+            command=self._toggle_instant_batch_mode,
+        )
+        self.instant_batch_switch.pack(fill="x", padx=12, pady=(0, 8))
+
+    def _toggle_instant_batch_mode(self) -> None:
+        """Toggle between Instant Batch Mode (immediate extraction) and Buffer Mode (5k words)."""
+        is_active = self.instant_batch_var.get()
+        self.db.set_setting("instant_batch_mode", "true" if is_active else "false")
+        if is_active:
+            self._flash_status_beacon("Instant Batch: ACTIVE ⚡", COLOR_SUCCESS)
+            # Immediately flush any items currently waiting in the rolling buffer
+            self._handle_flush_done()
+        else:
+            self._flash_status_beacon("Buffer Mode: 5,000 Words", COLOR_TEXT_MUTED)
 
     def _toggle_master_pause(self) -> None:
         """Toggle global pause state and inform local server."""
