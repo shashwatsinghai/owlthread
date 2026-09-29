@@ -37,19 +37,19 @@ class TestMemoryExtractor(unittest.TestCase):
         mock_llm.is_available.return_value = True
         mock_llm.chat_complete.return_value = json.dumps([
             {
-                "quadrant": "technical_architecture",
+                "action": "ADD", "quadrant": "technical_architecture",
                 "summary": "SQLite configured with WAL mode and 30s timeout.",
                 "source_snippet": "conn.execute('PRAGMA journal_mode=WAL;')"
             },
             {
-                "quadrant": "business_rules",
+                "action": "ADD", "quadrant": "business_rules",
                 "summary": "Pro tier pricing fixed at $29 per month.",
                 "source_snippet": "We agreed on $29/mo for Pro."
             }
         ])
 
         extractor = MemoryExtractor(llm_client=mock_llm)
-        items = extractor.extract("Some raw captured text...")
+        items = extractor.extract("conn.execute('PRAGMA journal_mode=WAL;')\nWe agreed on $29/mo for Pro.")
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0]["quadrant"], QUAD_TECHNICAL_ARCHITECTURE)
         self.assertEqual(items[1]["quadrant"], QUAD_BUSINESS_RULES)

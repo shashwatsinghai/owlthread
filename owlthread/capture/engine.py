@@ -1,18 +1,12 @@
-"""Universal Capture Engine orchestrator for OwlThread."""
-
+"""Lifecycle owner for clipboard, connectors, HTTP and periodic extraction."""
+from __future__ import annotations
 import logging
 import threading
-from typing import Any, Dict, List, Optional
-
-from owlthread.capture.clipboard import ClipboardWatcher
-from owlthread.capture.connectors.base import IConnector
-from owlthread.capture.connectors.cursor import CursorConnector
-from owlthread.capture.connectors.vscode_copilot import VSCodeCopilotConnector
+from typing import Any, Callable, TYPE_CHECKING
+if TYPE_CHECKING:
+    from owlthread.capture.connectors.base import IConnector
 from owlthread.capture.server import LocalHttpListener
-from owlthread.config import (
-    CONNECTOR_POLL_INTERVAL,
-    DEFAULT_HTTP_PORT,
-)
+from owlthread.config import DEFAULT_HTTP_PORT, CONNECTOR_POLL_INTERVAL
 from owlthread.db.database import Database
 from owlthread.extraction.pipeline import ExtractionPipeline
 
@@ -20,189 +14,118 @@ logger = logging.getLogger(__name__)
 
 
 class CaptureEngine:
-    """
-    Coordinates and manages all capture surfaces:
-    1. Clipboard Watcher
-    2. File Connectors (Cursor, VS Code Copilot, etc.)
-    3. Local HTTP Server (for browser extension)
-    4. Phase 2 Extraction & Rebase Pipeline
-    """
-
-    def __init__(
-        self,
-        db: Optional[Database] = None,
-        http_port: int = DEFAULT_HTTP_PORT,
-        enable_clipboard: bool = True,
-        enable_connectors: bool = True,
-        enable_http: bool = True,
-        connector_poll_interval: float = CONNECTOR_POLL_INTERVAL,
-        pipeline: Optional[ExtractionPipeline] = None,
-    ):
+    def __init__(self, db: Database | None = None, http_port: int = DEFAULT_HTTP_PORT,
+                 enable_clipboard: bool | None = None, enable_connectors: bool | None = None, enable_http: bool = True,
+                 connector_poll_interval: float = CONNECTOR_POLL_INTERVAL,
+                 pipeline: ExtractionPipeline | None = None, flush_interval: float = 60) -> None:
+        self._owns_db = db is None
         self.db = db or Database()
-        self.http_port = http_port
-        self.enable_clipboard = enable_clipboard
-        self.enable_connectors = enable_connectors
-        self.enable_http = enable_http
-        self.connector_poll_interval = connector_poll_interval
-        self.pipeline = pipeline or ExtractionPipeline(db=self.db)
-
-        # Components
-        self.clipboard_watcher: Optional[ClipboardWatcher] = None
-        if self.enable_clipboard:
+        self.strict_site_isolation = self.db.get_setting("strict_site_isolation", "true") != "false"
+        if enable_clipboard is None:
+            # The clipboard has no trustworthy source URL. Keep it off by default
+            # when immutable website blocking is required; explicit construction
+            # remains available for advanced/test use.
+            enable_clipboard = (not self.strict_site_isolation and
+                                self.db.get_setting("clipboard_enabled", "false") == "true")
+        if enable_connectors is None:
+            enable_connectors = self.db.get_setting("ide_capture_enabled", "false") == "true"
+        self.pipeline = pipeline or ExtractionPipeline(self.db)
+        if enable_clipboard:
+            from owlthread.capture.clipboard import ClipboardWatcher
             self.clipboard_watcher = ClipboardWatcher(self.db)
-
-        self.http_listener: Optional[LocalHttpListener] = None
-        if self.enable_http:
-            self.http_listener = LocalHttpListener(self.db, port=self.http_port)
-
-        self.connectors: List[IConnector] = []
-        if self.enable_connectors:
-            self.connectors.append(CursorConnector(self.db))
-            self.connectors.append(VSCodeCopilotConnector(self.db))
-
-        self._connector_stop_event = threading.Event()
-        self._connector_thread: Optional[threading.Thread] = None
+        else:
+            self.clipboard_watcher = None
+        self.http_listener = LocalHttpListener(self.db,port=http_port,pipeline=self.pipeline) if enable_http else None
+        self.connectors: list[IConnector] = []
+        if enable_connectors:
+            from owlthread.capture.connectors.cursor import CursorConnector
+            from owlthread.capture.connectors.vscode import VSCodeCopilotConnector
+            self.connectors = [CursorConnector(self.db), VSCodeCopilotConnector(self.db)]
+        for connector in self.connectors:
+            connector.poll_interval = connector_poll_interval
+        self.flush_interval = flush_interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
         self._is_running = False
-        self.http_listener_error: Optional[str] = None
+        self.http_listener_error: str | None = None
+        if self.http_listener:
+            self.http_listener.status_callback = self.status
 
     @property
     def is_running(self) -> bool:
-        """Return True if engine is running."""
         return self._is_running
 
     def register_connector(self, connector: IConnector) -> None:
-        """Register a custom IConnector."""
         self.connectors.append(connector)
-        if self._is_running:
+        if self.is_running:
             connector.start()
 
-    def add_capture_callback(self, callback) -> None:
-        """Register a callback for new captures arriving via HTTP server."""
+    def add_capture_callback(self, callback: Callable[[dict[str,Any]],None]) -> None:
         if self.http_listener:
             self.http_listener.add_capture_callback(callback)
 
     def start(self) -> None:
-        """Start all capture components."""
-        if self._is_running:
+        if self.is_running:
             return
-
-        logger.info("Starting Universal Capture Engine...")
-        self._is_running = True
         self.http_listener_error = None
-
-        # 1. Start HTTP Server
+        # Bind first; an occupied port must not start a second invisible capture daemon.
         if self.http_listener:
             try:
                 self.http_listener.start()
-            except Exception as e:
-                self.http_listener_error = str(e)
-                logger.error("Failed starting HTTP listener: %s", e)
-
-        # 2. Start Clipboard Watcher
+            except OSError as exc:
+                self.http_listener_error = str(exc)
+                raise RuntimeError("OwlThread's port is already in use. Open the running app or choose another port.") from exc
+        self._is_running = True
         if self.clipboard_watcher:
-            try:
-                self.clipboard_watcher.start()
-            except Exception as e:
-                logger.error("Failed starting Clipboard Watcher: %s", e)
-
-        # 3. Start Connectors
+            self.clipboard_watcher.start()
         for connector in self.connectors:
+            connector.start()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._flush_loop,name="OwlThread-Extraction",daemon=True)
+        self._thread.start()
+
+    def _flush_loop(self) -> None:
+        while not self._stop.wait(self.flush_interval):
             try:
-                connector.start()
-            except Exception as e:
-                logger.error("Failed starting connector %s: %s", connector.name, e)
-
-        if self.connectors:
-            self._connector_stop_event.clear()
-            self._connector_thread = threading.Thread(
-                target=self._run_connector_loop,
-                name="OwlThread-ConnectorPoller",
-                daemon=True
-            )
-            self._connector_thread.start()
-
-        logger.info("Universal Capture Engine running.")
+                self.pipeline.handle_done_signal()
+            except Exception:
+                logger.exception("Periodic extraction failed; captures remain in SQLite")
 
     def stop(self) -> None:
-        """Stop all capture components."""
-        if not self._is_running:
-            return
-
-        logger.info("Stopping Universal Capture Engine...")
-        self._is_running = False
-
-        # Stop connector loop
-        self._connector_stop_event.set()
-        if self._connector_thread and self._connector_thread.is_alive():
-            self._connector_thread.join(timeout=2.0)
-
-        # Stop connectors
-        for connector in self.connectors:
-            try:
-                connector.stop()
-            except Exception as e:
-                logger.error("Error stopping connector %s: %s", connector.name, e)
-
-        # Stop clipboard watcher
+        self._stop.set()
         if self.clipboard_watcher:
-            try:
-                self.clipboard_watcher.stop()
-            except Exception as e:
-                logger.error("Error stopping clipboard watcher: %s", e)
-
-        # Stop HTTP server
+            self.clipboard_watcher.stop()
+        for connector in self.connectors:
+            connector.stop()
         if self.http_listener:
-            try:
-                self.http_listener.stop()
-            except Exception as e:
-                logger.error("Error stopping HTTP listener: %s", e)
+            self.http_listener.stop()
+        if self._thread:
+            self._thread.join()
+        self._is_running = False
+        if self._owns_db:
+            self.db.close()
 
-        logger.info("Universal Capture Engine stopped.")
-
-    def poll_connectors_once(self) -> Dict[str, int]:
-        """Manually trigger a synchronous poll for all registered connectors."""
-        results = {}
+    def poll_connectors_once(self) -> dict[str,int]:
+        counts = {}
         for connector in self.connectors:
             try:
-                captured = connector.poll()
-                results[connector.name] = captured
-            except Exception as e:
-                logger.error("Error during manual poll of %s: %s", connector.name, e)
-                results[connector.name] = 0
-        return results
+                counts[connector.name] = connector.poll()
+            except Exception:
+                logger.exception("Connector poll failed: %s",connector.name)
+                counts[connector.name] = 0
+        return counts
 
-    def handle_done_signal(self) -> Dict[str, Any]:
-        """Trigger buffer flush and extraction."""
+    def handle_done_signal(self) -> dict[str,Any]:
         return self.pipeline.handle_done_signal()
 
-    def _run_connector_loop(self) -> None:
-        """Background thread polling file connectors periodically."""
-        while not self._connector_stop_event.is_set():
-            for connector in self.connectors:
-                if self._connector_stop_event.is_set():
-                    break
-                try:
-                    connector.poll()
-                except Exception as e:
-                    logger.error("Error polling connector %s: %s", connector.name, e)
-
-            self._connector_stop_event.wait(self.connector_poll_interval)
-
-    def status(self) -> Dict[str, Any]:
-        """Return operational status of all surfaces."""
-        connector_statuses = [
-            {"name": c.name, "is_running": c.is_running}
-            for c in self.connectors
-        ]
-        return {
-            "engine_running": self._is_running,
-            "clipboard_watcher": self.clipboard_watcher.is_running if self.clipboard_watcher else False,
-            "http_listener": {
-                "running": self.http_listener.is_running if self.http_listener else False,
-                "host": self.http_listener.host if self.http_listener else None,
-                "port": self.http_listener.port if self.http_listener else None,
-            },
-            "connectors": connector_statuses,
-            "total_entries": self.db.count_entries(),
-            "active_buffers": self.pipeline.buffer_manager.get_stats(),
-        }
+    def status(self) -> dict[str,Any]:
+        self.pipeline.llm_client.reload_from_db(self.db)
+        return {"engine_running":self.is_running,"clipboard_watcher":bool(self.clipboard_watcher and self.clipboard_watcher.is_running),
+                "http_listener":{"running":bool(self.http_listener and self.http_listener.is_running),
+                                 "host":"127.0.0.1","port":self.http_listener.port if self.http_listener else None},
+                "connectors":[{"name":c.name,"is_running":c.is_running,"error":c.last_error} for c in self.connectors],
+                "total_entries":self.db.count_entries(),"pending_captures":self.db.pending_count(),
+                "capture_paused":self.db.get_setting("capture_paused","false")=="true",
+                "strict_site_isolation":self.strict_site_isolation,
+                "model_provider":self.pipeline.llm_client.provider,"model_name":self.pipeline.llm_client.model,
+                "model_ready":self.pipeline.llm_client.is_available()}

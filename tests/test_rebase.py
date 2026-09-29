@@ -1,325 +1,127 @@
-"""Unit tests for Phase 2 Rebase (supersede logic)."""
-
+"""Production-path extraction, successor chains and transactional conflicts."""
+import concurrent.futures
 import json
-import os
 import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
-
 from owlthread.db.database import Database
-from owlthread.extraction.rebase import REBASE_SYSTEM_PROMPT, RebaseEngine
+from owlthread.extraction.pipeline import ExtractionPipeline
 from owlthread.primer.llm import LLMClient
+from owlthread.primer.search import MemorySearcher
 
 
 class TestRebaseEngine(unittest.TestCase):
-    """Test suite for rebase & supersede engine."""
-
     def setUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.tmp_dir.name, "test_rebase.db")
-        self.db = Database(self.db_path)
-        self.rebase_engine = RebaseEngine(self.db)
+        self.tmp=tempfile.TemporaryDirectory()
+        self.db=Database(str(Path(self.tmp.name)/"rebase.db"))
+        self.pid=self.db.get_or_create_project()
+        self.llm=MagicMock(spec=LLMClient)
+        self.llm.is_available.return_value=True
+        self.pipeline=ExtractionPipeline(self.db,self.llm)
 
     def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.db.close();self.tmp.cleanup()
 
-    def test_rebase_system_prompt_requirements(self):
-        """Verify rebase system prompt contains the specified instructions."""
-        self.assertIn("You are the Epistemological Memory Rebase Engine for OwlThread", REBASE_SYSTEM_PROMPT)
-        self.assertIn('"action": "ADD" | "UPDATE" | "SUPERSEDE" | "NOOP"', REBASE_SYSTEM_PROMPT)
-        self.assertIn("SUPERSEDE: Candidate fact directly contradicts", REBASE_SYSTEM_PROMPT)
+    def extract(self,actions,text="Decision: use SQLite WAL"):
+        self.llm.chat_complete.return_value=json.dumps(actions)
+        self.db.insert_capture(text,"manual",self.pid)
+        return self.pipeline.handle_done_signal()
 
-    def test_rebase_supersede_execution(self):
-        """Verify that when a supersede match occurs, old record is marked superseded and new record is active."""
-        pid = self.db.get_or_create_project("BillingApp")
+    def action(self,kind="ADD",target=None,text="Decision: use SQLite WAL",quadrant="settled_decisions"):
+        return {"action":kind,"quadrant":quadrant,"summary":text,"source_snippet":text,
+                "target_memory_id":target,"rationale":"Refinement" if kind=="UPDATE" else "Explicit replacement"}
 
-        # 1. Insert existing active decision
-        old_id = self.db.insert_entry(
-            raw_text="Decision: Use PayPal for payments.",
-            source_app="cursor",
-            project_id=pid,
-            quadrant="settled_decisions",
-            summary="Decision: Use PayPal for payments.",
-            status="active"
-        )
+    def test_add_then_normalized_duplicate(self):
+        self.assertEqual(self.extract([self.action()])["total_extracted"],1)
+        variant="decision:  use SQLite WAL."
+        self.assertEqual(self.extract([self.action(text=variant)],variant)["total_extracted"],0)
+        self.assertEqual(self.db.count_entries(),1)
 
-        # Mock LLM to return supersede match
-        mock_llm = MagicMock(spec=LLMClient)
-        mock_llm.is_available.return_value = True
-        mock_llm.chat_complete.return_value = json.dumps({
-            "supersedes_id": old_id,
-            "reason": "Replaced PayPal with Stripe."
-        })
+    def test_noop_commits_checkpoint_without_memory(self):
+        self.assertEqual(self.extract([{"action":"NOOP"}])["total_extracted"],0)
+        self.assertEqual(self.db.pending_count(),0)
 
-        engine = RebaseEngine(db=self.db, llm_client=mock_llm)
-        new_item = {
-            "quadrant": "settled_decisions",
-            "summary": "Decision: Switched from PayPal to Stripe Checkout.",
-            "source_snippet": "We migrated away from PayPal."
-        }
+    def test_update_and_supersede_create_successors(self):
+        self.extract([self.action()])
+        old=self.db.get_entries()[0]["id"]
+        for kind in ("UPDATE","SUPERSEDE"):
+            text="Decision: use SQLite WAL "+kind
+            result=self.extract([self.action(kind,old,text)],text)
+            new=result["extracted_entries"][0]["entry_id"]
+            self.assertNotEqual(new,old)
+            self.assertEqual(self.db.get_entry_by_id(old)["superseded_by"],new)
+            self.assertEqual(self.db.get_entry_lineage(new)[0]["predecessor_id"],old)
+            self.assertEqual(self.db.count_entries(),1)
+            old=new
 
-        new_id, superseded_id = engine.process_item(
-            project_id=pid,
-            source_app="cursor",
-            item=new_item
-        )
+    def test_long_chain_only_latest_in_search(self):
+        self.extract([self.action()])
+        old=self.db.get_entries()[0]["id"]
+        for index in range(30):
+            text=f"Decision: use SQLite WAL with revision {index}"
+            result=self.extract([self.action("UPDATE",old,text)],text)
+            old=result["extracted_entries"][0]["entry_id"]
+        self.assertEqual(self.db.count_entries(include_history=True),31)
+        self.assertEqual([r["id"] for r in MemorySearcher(self.db).search("SQLite")],[old])
+        self.assertEqual(len(self.db.execute_read("SELECT * FROM memory_lineage")),30)
 
-        self.assertEqual(superseded_id, old_id)
-        self.assertGreater(new_id, old_id)
+    def test_cross_project_target_rejected(self):
+        other=self.db.get_or_create_project("Other")
+        old=self.db.insert_entry("Other project","manual",other,quadrant="settled_decisions")
+        result=self.extract([self.action("SUPERSEDE",old)])
+        self.assertEqual(result["status"],"partial")
+        self.assertEqual(self.db.pending_count(),1)
+        self.assertEqual(self.db.count_entries(),1)
 
-        # Check old entry status
-        old_entry = self.db.get_entry_by_id(old_id)
-        self.assertEqual(old_entry["status"], "superseded")
-        self.assertEqual(old_entry["superseded_by"], new_id)
+    def test_cross_quadrant_target_rejected(self):
+        old=self.db.insert_entry("Architecture","manual",self.pid,quadrant="technical_architecture")
+        self.assertEqual(self.extract([self.action("UPDATE",old)])["status"],"partial")
+        self.assertEqual(self.db.count_entries(),1)
 
-        # Check new entry status
-        new_entry = self.db.get_entry_by_id(new_id)
-        self.assertEqual(new_entry["status"], "active")
-        self.assertIsNone(new_entry["superseded_by"])
+    def test_invalid_second_action_rolls_back_entire_slice(self):
+        invalid=self.action();invalid["source_snippet"]="Not present"
+        self.assertEqual(self.extract([self.action(),invalid])["status"],"partial")
+        self.assertEqual(self.db.count_entries(),0)
+        self.assertEqual(self.db.get_unprocessed_captures()[0]["processed_chars"],0)
 
-    def test_rebase_no_match_inserts_active(self):
-        """Verify that non-matching items are inserted as active without modifying prior entries."""
-        pid = self.db.get_or_create_project("AuthApp")
+    def test_missing_evidence_boolean_target_and_oversize_rejected(self):
+        for change in ({"source_snippet":""},{"summary":"a"*241},{"action":"UPDATE","target_memory_id":True},{"confidence":"high"}):
+            with self.subTest(change=change):
+                result=self.extract([{**self.action(),**change}])
+                self.assertEqual(result["status"],"partial")
+                self.assertEqual(self.db.count_entries(),0)
 
-        id1 = self.db.insert_entry(
-            raw_text="Use JWT tokens for auth.",
-            source_app="cursor",
-            project_id=pid,
-            quadrant="technical_architecture",
-            summary="Use JWT tokens for auth.",
-            status="active"
-        )
+    def test_low_confidence_is_skipped(self):
+        result=self.extract([{**self.action(),"confidence":.5}])
+        self.assertEqual(result["total_extracted"],0)
+        self.assertEqual(self.db.pending_count(),0)
 
-        mock_llm = MagicMock(spec=LLMClient)
-        mock_llm.is_available.return_value = True
-        mock_llm.chat_complete.return_value = json.dumps({
-            "supersedes_id": None,
-            "reason": None
-        })
+    def test_model_outage_and_invalid_json_remain_pending(self):
+        self.db.insert_capture("Decision: keep audit history","manual")
+        for response in ("not json","{}",'["not an action"]'):
+            self.llm.chat_complete.return_value=response
+            self.assertEqual(self.pipeline.handle_done_signal()["status"],"partial")
+            self.assertEqual(self.db.pending_count(),1)
+        self.llm.chat_complete.side_effect=RuntimeError("private provider response")
+        result=self.pipeline.handle_done_signal()
+        self.assertNotIn("private provider",json.dumps(result))
+        self.assertEqual(self.db.get_unprocessed_captures()[0]["extraction_status"],"failed")
 
-        engine = RebaseEngine(db=self.db, llm_client=mock_llm)
-        new_item = {
-            "quadrant": "technical_architecture",
-            "summary": "Database runs on port 5432.",
-            "source_snippet": "postgres port 5432"
-        }
-
-        id2, superseded_id = engine.process_item(
-            project_id=pid,
-            source_app="cursor",
-            item=new_item
-        )
-
-        self.assertIsNone(superseded_id)
-        self.assertEqual(self.db.get_entry_by_id(id1)["status"], "active")
-        self.assertEqual(self.db.get_entry_by_id(id2)["status"], "active")
-
-    def test_pure_python_candidate_ranking_without_vector_db(self):
-        """Verify candidate ranking ranks relevant active memories using pure Python lexical heuristics."""
-        from owlthread.extraction.rebase import rank_candidates_pure_python
-
-        memories = [
-            {"id": i, "summary": f"Irrelevant configuration detail #{i}", "raw_text": "nothing"}
-            for i in range(1, 25)
-        ]
-        memories.append({"id": 99, "summary": "Decision: Migrated database to PostgreSQL on port 5432", "raw_text": "postgresql database"})
-
-        ranked = rank_candidates_pure_python(
-            candidate_fact="Switched from PostgreSQL to SQLite for local storage.",
-            existing_memories=memories,
-            max_candidates=5
-        )
-
-        self.assertEqual(len(ranked), 5)
-        # Entry #99 should be ranked first due to PostgreSQL overlap and supersede cue
-        self.assertEqual(ranked[0]["id"], 99)
-
-    def test_rebase_memory_add_action(self):
-        """Verify rebase_memory performs ADD when no existing memories are present."""
-        from owlthread.extraction.rebase import rebase_memory
-
-        pid = self.db.get_or_create_project("PurePyApp")
-        res = rebase_memory(
-            db=self.db,
-            project_id=pid,
-            quadrant="business_rules",
-            candidate_fact="Enterprise plan includes SSO and audit logs.",
-            source_app="cursor",
-        )
-
-        self.assertEqual(res["action"], "ADD")
-        self.assertIsNotNone(res["entry_id"])
-        self.assertIsNone(res["target_memory_id"])
-        self.assertEqual(res["quadrant"], "business_rules")
-
-        entry = self.db.get_entry_by_id(res["entry_id"])
-        self.assertEqual(entry["status"], "active")
-        self.assertEqual(entry["summary"], "Enterprise plan includes SSO and audit logs.")
-        self.assertEqual(entry["quadrant"], "business_rules")
-
-    def test_rebase_memory_update_action(self):
-        """Verify rebase_memory performs UPDATE in-place without generating a new ID."""
-        from owlthread.extraction.rebase import rebase_memory
-        from unittest.mock import patch
-
-        pid = self.db.get_or_create_project("PurePyApp")
-        orig_id = self.db.insert_entry(
-            raw_text="Database uses SQLite.",
-            source_app="cursor",
-            project_id=pid,
-            quadrant="technical_architecture",
-            summary="Database uses SQLite.",
-            status="active"
-        )
-
-        mock_ollama_json = json.dumps({
-            "action": "UPDATE",
-            "target_memory_id": orig_id,
-            "statement": "Database uses SQLite configured with PRAGMA journal_mode=WAL and busy_timeout=5000.",
-            "conflict_rationale": None
-        })
-
-        with patch("owlthread.extraction.rebase.call_ollama_chat", return_value=mock_ollama_json):
-            res = rebase_memory(
-                db=self.db,
-                project_id=pid,
-                quadrant="technical_architecture",
-                candidate_fact="Database uses SQLite with WAL mode and 5000ms busy timeout.",
-            )
-
-        self.assertEqual(res["action"], "UPDATE")
-        self.assertEqual(res["entry_id"], orig_id)
-        self.assertEqual(res["target_memory_id"], orig_id)
-
-        # Database record should be updated in-place
-        updated = self.db.get_entry_by_id(orig_id)
-        self.assertEqual(updated["status"], "active")
-        self.assertIn("PRAGMA journal_mode=WAL", updated["summary"])
-
-    def test_rebase_memory_supersede_action_and_lineage(self):
-        """Verify rebase_memory performs SUPERSEDE: predecessor marked superseded, successor active, lineage recorded."""
-        from owlthread.extraction.rebase import rebase_memory
-        from unittest.mock import patch
-
-        pid = self.db.get_or_create_project("PurePyApp")
-        old_id = self.db.insert_entry(
-            raw_text="Team decision: Use React and Redux.",
-            source_app="cursor",
-            project_id=pid,
-            quadrant="settled_decisions",
-            summary="Team decision: Use React and Redux.",
-            status="active"
-        )
-
-        mock_ollama_json = json.dumps({
-            "action": "SUPERSEDE",
-            "target_memory_id": old_id,
-            "statement": "Decision: Migrated from Redux to Zustand for lightweight state management.",
-            "conflict_rationale": "Redux boilerplate was excessive; Zustand selected for simplicity."
-        })
-
-        with patch("owlthread.extraction.rebase.call_ollama_chat", return_value=mock_ollama_json):
-            res = rebase_memory(
-                db=self.db,
-                project_id=pid,
-                quadrant="settled_decisions",
-                candidate_fact="Switched from Redux to Zustand for state management.",
-            )
-
-        self.assertEqual(res["action"], "SUPERSEDE")
-        new_id = res["entry_id"]
-        self.assertGreater(new_id, old_id)
-
-        # Predecessor verification
-        old_entry = self.db.get_entry_by_id(old_id)
-        self.assertEqual(old_entry["status"], "superseded")
-        self.assertEqual(old_entry["superseded_by"], new_id)
-
-        # Successor verification
-        new_entry = self.db.get_entry_by_id(new_id)
-        self.assertEqual(new_entry["status"], "active")
-        self.assertIsNone(new_entry["superseded_by"])
-
-        # Lineage graph verification
-        lineage = self.db.get_entry_lineage(new_id)
-        self.assertEqual(len(lineage), 1)
-        self.assertEqual(lineage[0]["predecessor_id"], old_id)
-        self.assertEqual(lineage[0]["conflict_rationale"], "Redux boilerplate was excessive; Zustand selected for simplicity.")
-
-    def test_rebase_memory_noop_action(self):
-        """Verify rebase_memory performs NOOP on duplicate facts without modifying the database."""
-        from owlthread.extraction.rebase import rebase_memory
-        from unittest.mock import patch
-
-        pid = self.db.get_or_create_project("PurePyApp")
-        entry_id = self.db.insert_entry(
-            raw_text="Open Question: Evaluate tRPC vs GraphQL.",
-            source_app="cursor",
-            project_id=pid,
-            quadrant="open_questions",
-            summary="Open Question: Evaluate tRPC vs GraphQL.",
-            status="active"
-        )
-
-        mock_ollama_json = json.dumps({
-            "action": "NOOP",
-            "target_memory_id": entry_id,
-            "statement": "Open Question: Evaluate tRPC vs GraphQL.",
-            "conflict_rationale": None
-        })
-
-        with patch("owlthread.extraction.rebase.call_ollama_chat", return_value=mock_ollama_json):
-            res = rebase_memory(
-                db=self.db,
-                project_id=pid,
-                quadrant="open_questions",
-                candidate_fact="We still need to evaluate tRPC vs GraphQL.",
-            )
-
-        self.assertEqual(res["action"], "NOOP")
-        self.assertIsNone(res["entry_id"])
-        self.assertEqual(res["target_memory_id"], entry_id)
-
-        # Database record should remain active and unchanged
-        entry = self.db.get_entry_by_id(entry_id)
-        self.assertEqual(entry["status"], "active")
-        self.assertIsNone(entry["superseded_by"])
-
-    def test_mem0_delete_mapping_to_supersede(self):
-        """Verify that if an LLM responds with Mem0 DELETE format, it maps gracefully to SUPERSEDE."""
-        from owlthread.extraction.rebase import rebase_memory
-        from unittest.mock import patch
-
-        pid = self.db.get_or_create_project("PurePyApp")
-        old_id = self.db.insert_entry(
-            raw_text="Billing: Flat pricing at $20/mo.",
-            source_app="cursor",
-            project_id=pid,
-            quadrant="business_rules",
-            summary="Flat pricing at $20/mo.",
-            status="active"
-        )
-
-        # Mem0 returns "DELETE" when facts contradict
-        mem0_response = json.dumps({
-            "action": "DELETE",
-            "target_memory_id": old_id,
-            "statement": "Switched to usage-based pricing at $0.002 per event.",
-            "conflict_rationale": "Contradicts flat monthly pricing."
-        })
-
-        with patch("owlthread.extraction.rebase.call_ollama_chat", return_value=mem0_response):
-            res = rebase_memory(
-                db=self.db,
-                project_id=pid,
-                quadrant="business_rules",
-                candidate_fact="Switched to usage-based pricing at $0.002 per event.",
-            )
-
-        self.assertEqual(res["action"], "SUPERSEDE")
-        self.assertEqual(self.db.get_entry_by_id(old_id)["status"], "superseded")
-        self.assertEqual(self.db.get_entry_by_id(res["entry_id"])["status"], "active")
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_concurrent_conflicting_successors_one_wins_one_pending(self):
+        old=self.db.insert_entry("Original","manual",self.pid,quadrant="settled_decisions")
+        for index in range(2): self.db.insert_capture(f"Decision: revision {index}","manual",self.pid)
+        captures=self.db.get_unprocessed_captures()
+        barrier=threading.Barrier(2)
+        def commit(capture):
+            item=self.action("UPDATE",old,capture["raw_text"])
+            barrier.wait()
+            try: return self.pipeline._commit(capture,len(capture["raw_text"]),[item])
+            except ValueError: return None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(commit,captures))
+        self.assertEqual(sum(r is not None for r in results),1)
+        self.assertEqual(self.db.pending_count(),1)
+        self.assertEqual(self.db.count_entries(),1)
+        self.assertEqual(len(self.db.execute_read("SELECT * FROM memory_lineage")),1)

@@ -1,14 +1,6 @@
-"""OwlThread Desktop Application entry point."""
-
+"""Packaged launcher: open the desktop by default, or forward CLI arguments."""
+from __future__ import annotations
 import sys
-import os
-
-# Ensure project root is in sys.path
-root_dir = os.path.dirname(os.path.abspath(__file__))
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
-
-from owlthread.gui.app import run_app
-
+from owlthread.cli import main
 if __name__ == "__main__":
-    run_app()
+    raise SystemExit(main(sys.argv[1:] or ["app"]))

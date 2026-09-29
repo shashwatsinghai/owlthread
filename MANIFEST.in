@@ -1,0 +1,15 @@
+include LICENSE README.md OwlThread.spec owlthread.ico main.py
+include Launch_OwlThread.bat run.bat run_owlthread.bat owlthread.cmd
+include extension/manifest.json extension/background.ts extension/background.js
+include extension/content.ts extension/content.js extension/tsconfig.json
+include extension/package.json extension/package-lock.json
+recursive-include extension/popup *.html *.css *.ts *.js
+recursive-include extension/icons *.png
+recursive-include extension/tests *.cjs
+recursive-include tests *.py
+recursive-include tools *.py
+include extension/policy.ts extension/policy.js extension/companion.ts extension/companion.js extension/help.html
+recursive-include extension/assets owl-cozy-developer.png
+recursive-include extension/prompts *.txt
+include CHANGELOG.md SECURITY.md CONTRIBUTING.md requirements-windows.lock
+recursive-include docs *.md

@@ -1,19 +1,32 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "owlthread"
-version = "0.1.0"
-description = "Universal Capture Engine for OwlThread"
+version = "1.5.0"
+description = "Local developer memory and task context briefs"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
-    "customtkinter>=5.2.0",
-    "pystray>=0.19.5",
-    "pillow>=10.0.0",
-    "pywin32>=306; platform_system=='Windows'",
+  "keyboard>=0.13.5",
+  "pystray>=0.19.5",
+  "Pillow>=10.0.0",
+  "mcp>=1.0.0,<2",
+  "pywin32>=306; sys_platform=='win32'",
 ]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0", "build>=1.2"]
 
 [project.scripts]
 owlthread = "owlthread.cli:main"
+owlthread-mcp = "owlthread.mcp_entry:run_mcp_service"
+
+[project.gui-scripts]
+owlthread-gui = "owlthread.gui.app:run_app"
+
+[tool.setuptools.packages.find]
+include = ["owlthread*"]
+exclude = ["tests*", "continue*", "mem0*"]

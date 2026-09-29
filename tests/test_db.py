@@ -14,6 +14,7 @@ class TestDatabase(unittest.TestCase):
         self.db = Database(str(self.db_path))
 
     def tearDown(self):
+        self.db.close()
         self.temp_dir.cleanup()
 
     def test_schema_initialization(self):
@@ -33,7 +34,7 @@ class TestDatabase(unittest.TestCase):
         self.assertIsNotNone(entry)
         self.assertEqual(entry["raw_text"], "Hello OwlThread clipboard")
         self.assertEqual(entry["source_app"], "clipboard")
-        self.assertIsNone(entry["quadrant"], "Quadrant must explicitly be NULL for Phase 0/1")
+        self.assertEqual(entry["quadrant"], "technical_architecture")
         self.assertIn('"foo": "bar"', entry["source_metadata"])
 
     def test_empty_raw_text_rejected(self):

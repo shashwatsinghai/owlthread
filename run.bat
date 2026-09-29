@@ -1,2 +1,2 @@
 @echo off
-start "" "%~dp0dist\OwlThread\OwlThread.exe"
+call "%~dp0Launch_OwlThread.bat"

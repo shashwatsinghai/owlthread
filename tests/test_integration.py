@@ -13,6 +13,7 @@ from owlthread.capture.connectors.cursor import CursorConnector
 from owlthread.capture.connectors.vscode_copilot import VSCodeCopilotConnector
 from owlthread.capture.engine import CaptureEngine
 from owlthread.cli import run_wrapped_command
+from owlthread.security import local_token
 from owlthread.db.database import Database
 
 
@@ -39,6 +40,7 @@ class TestMultiSurfaceIntegration(unittest.TestCase):
 
     def tearDown(self):
         self.engine.stop()
+        self.db.close()
         self.temp_dir.cleanup()
 
     def test_all_four_surfaces_capture(self):
@@ -96,26 +98,26 @@ class TestMultiSurfaceIntegration(unittest.TestCase):
         # Surface 4: Browser Extension HTTP POST
         payload = {
             "text": "Browser selected text",
-            "source_app": "browser",
+            "source_app": "browser_extension",
             "url": "https://example.org/chat",
             "title": "Chat Page"
         }
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/capture",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json", "Authorization":"Bearer "+local_token(self.db)}
         )
         with urllib.request.urlopen(req) as resp:
             self.assertEqual(resp.status, 200)
 
         # Verification across all surfaces
-        self.assertEqual(self.db.count_entries(source_app="clipboard"), 1)
-        self.assertEqual(self.db.count_entries(source_app="cursor"), 1)
-        self.assertEqual(self.db.count_entries(source_app="copilot"), 1)
-        self.assertEqual(self.db.count_entries(source_app="cli"), 1)
-        self.assertEqual(self.db.count_entries(source_app="browser"), 1)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "clipboard"]), 1)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "cursor_ide"]), 1)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "vscode_copilot"]), 1)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "cli_run"]), 1)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "browser_extension"]), 1)
 
-        total_entries = self.db.get_entries(limit=10)
+        total_entries = self.db.get_unprocessed_captures(limit=10)
         self.assertEqual(len(total_entries), 5)
 
         for entry in total_entries:

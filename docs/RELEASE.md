@@ -1,0 +1,14 @@
+# Release procedure — Windows
+
+1. Preserve the current worktree. Read the verification report and unresolved limitations before recommending a public release.
+2. Set the version in pyproject.toml and run python tools/sync_version.py. Run npm ci and npm test in extension/. Verify current Python tests in a clean environment.
+3. Create an isolated build environment using python -m venv artifacts/build-env-VERSION. Install requirements-windows.lock and then pip install --no-deps --no-build-isolation -e . . The checked lock is for Windows Python 3.14.
+4. Run python tools/record_build.py. It compiles TypeScript into a temporary directory, checks generated JavaScript byte-for-byte and records hashes of production Python, extension assets, specification, version and lock. The provenance records the Git base and dirty status; a dirty build is not labeled a committed release.
+5. Run python -m PyInstaller --noconfirm --clean --distpath artifacts/dist/VERSION --workpath artifacts/build/VERSION OwlThread.spec using the clean build environment. This creates GUI and console executables sharing their dependency folder. The build is unsigned; byte-for-byte reproducibility across machines is not claimed.
+6. Run python tools/package_smoke.py artifacts/dist/VERSION/OwlThread/owlthread-cli.exe. This exercises capture, extraction, primer, native clipboard, status and a real MCP stdio client on an isolated database.
+7. Build wheel/sdist with python -m build --no-isolation --outdir artifacts/release/VERSION. The wheel contains Python runtime; the sdist also includes extension sources/assets, tests and tooling. Run python tools/bundle_release.py after recording/building unchanged production sources. It refuses source drift and generates complete extension and Windows ZIPs plus SHA256SUMS.txt.
+8. Extract both ZIPs into a new temporary directory, validate their assets and provenance, rerun package_smoke.py from the extracted executable, and install the wheel in a fresh environment with no source-tree import fallback. Build a wheel from the extracted sdist too.
+9. Exercise installed Chrome/Brave extension behavior and the real local API. Distinguish browser fixtures from signed-in live AI-site checks. Validate portable desktop, tray, global shortcut outside the app and clipboard in a normal Windows session. If an interaction cannot be verified, record that gate as incomplete.
+10. Update docs/VERIFICATION.md with exact outputs and limitations. Rehash artifacts if any artifact is rebuilt; never reuse an older ZIP merely because its filename looks correct. Publish only under the maintainer's explicit authorization.
+
+Old unversioned artifacts are not current releases. This audit writes only under artifacts/release/1.5.0 and preserves earlier local outputs. Back up user data before migration. No cloud deployment, GitHub release, extension-store submission, code signing or auto-update configuration is part of this local build.

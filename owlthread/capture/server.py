@@ -1,710 +1,365 @@
-"""Local HTTP Server for receiving browser extension captures, serving Primer requests, and flushing buffers."""
+"""Bounded loopback HTTP ingestion and primer API."""
+from __future__ import annotations
 
 import json
 import logging
 import threading
-from http import HTTPStatus
+import secrets
+import time
+import re
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Callable
+from urllib.parse import parse_qs, urlsplit
 
-from owlthread.config import (
-    DEFAULT_HTTP_HOST,
-    DEFAULT_HTTP_PORT,
-    SOURCE_BROWSER,
-)
-from owlthread.db.database import Database
+from owlthread.config import DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, VALID_QUADRANTS
+from owlthread.db.database import Database, get_iso_now
 from owlthread.extraction.pipeline import ExtractionPipeline
 from owlthread.primer.engine import PrimerEngine
+from owlthread.context_awareness import PageIntelligence
+from owlthread.security import local_token, EXTENSION_ORIGIN, MAX_CAPTURE, web_url, project_name
+from owlthread.site_policy import is_hard_blocked_url
 
 logger = logging.getLogger(__name__)
+MAX_BODY = 1_048_576
 
 
 class CaptureRequestHandler(BaseHTTPRequestHandler):
-    """HTTP Request Handler for /capture, /health, /entries, /primer, and /flush."""
+    server: CaptureHTTPServer
 
-    server: "CaptureHTTPServer"  # Type hint for custom server attribute
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(15)
 
-    def _set_cors_headers(self) -> None:
-        """Set CORS headers to permit browser extension fetch requests."""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Requested-With")
+    def log_message(self, format: str, *args: Any) -> None:
+        # Paths can contain user query text. Do not put it in logs.
+        logger.debug("Local HTTP request completed")
 
-    def _send_json_response(self, status_code: int, data: dict) -> None:
-        """Send a JSON payload response."""
-        response_bytes = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(response_bytes)))
-        self._set_cors_headers()
+    def _send(self, code: int, data: dict[str,Any]) -> None:
+        body = json.dumps(data,ensure_ascii=False,default=str).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type","application/json; charset=utf-8")
+        self.send_header("Content-Length",str(len(body)))
+        self.send_header("Cache-Control","no-store")
+        origin = self.headers.get("Origin", "")
+        if EXTENSION_ORIGIN.fullmatch(origin) and (self.path == "/pair" or self.server.origin_allowed(origin)):
+            self.send_header("Access-Control-Allow-Origin",origin)
+            self.send_header("Vary","Origin")
+            self.send_header("Access-Control-Allow-Methods","GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization")
+        self.send_header("X-Content-Type-Options","nosniff")
         self.end_headers()
-        self.wfile.write(response_bytes)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError,ConnectionResetError):
+            logger.debug("HTTP client disconnected")
+
+    def _host_ok(self) -> bool:
+        host = self.headers.get("Host","").lower()
+        if len(self.headers.get_all("Host", [])) != 1 or host not in {f"127.0.0.1:{self.server.server_port}",f"localhost:{self.server.server_port}"}:
+            self._send(403,{"error":"Loopback Host header required"})
+            return False
+        return True
+
+    def _authorized(self, preflight: bool = False) -> bool:
+        if not self._host_ok():
+            return False
+        if not self.server.allow_request():
+            self._send(429,{"error":"Too many local requests; retry shortly"})
+            return False
+        origin = self.headers.get("Origin")
+        path = urlsplit(self.path).path
+        if origin is not None and (len(self.headers.get_all("Origin", [])) != 1 or not EXTENSION_ORIGIN.fullmatch(origin)
+                                   or (path != "/pair" and not self.server.origin_allowed(origin))):
+            self._send(403,{"error":"Browser origin is not authorized"})
+            return False
+        if preflight:
+            if not origin or self.headers.get("Access-Control-Request-Method") not in {"GET","POST"}:
+                self._send(403,{"error":"Invalid preflight"})
+                return False
+            requested = {s.strip().lower() for s in self.headers.get("Access-Control-Request-Headers","").split(",") if s.strip()}
+            if not requested <= {"authorization","content-type"}:
+                self._send(403,{"error":"Unsupported request headers"})
+                return False
+            return True
+        if path == "/health" and self.command == "GET":
+            return True
+        credential = self.headers.get("Authorization", "")
+        if len(self.headers.get_all("Authorization", [])) != 1 or not secrets.compare_digest(
+                credential.encode(), ("Bearer " + local_token(self.server.db)).encode()):
+            self._send(401,{"error":"Pair this client in OwlThread Settings"})
+            return False
+        return True
+
+    def _project(self, payload: dict[str,Any]) -> int:
+        pid = payload.get("project_id")
+        name = payload.get("project",payload.get("project_name"))
+        if pid is not None:
+            if type(pid) is not int or pid <= 0:
+                raise ValueError("Invalid project_id")
+            project = self.server.db.get_project_by_id(pid)
+            if not project or (name is not None and project_name(name) != project["name"]):
+                raise ValueError("Project does not exist or conflicts with project_id")
+            return pid
+        return self.server.db.get_or_create_project(project_name(name if name is not None else self.server.db.get_setting("active_project","General")))
+
+    def _payload(self) -> dict[str,Any]:
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("Chunked requests are not supported")
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+            raise ValueError("Exactly one numeric Content-Length is required")
+        length = int(lengths[0])
+        if not 0 < length <= MAX_BODY:
+            raise ValueError("Request body must be between 1 byte and 1 MiB")
+        if self.headers.get_content_type() != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("Incomplete request body")
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload,dict):
+            raise ValueError("JSON body must be an object")
+        return payload
+
+    @staticmethod
+    def _limit(value: Any, default: int = 20) -> int:
+        if value is None:
+            return default
+        if isinstance(value,bool) or not str(value).isdigit() or not 1 <= int(value) <= 200:
+            raise ValueError("limit must be an integer between 1 and 200")
+        return int(value)
+
+    @staticmethod
+    def _text(payload: dict[str,Any], *keys: str) -> str:
+        value = next((payload[k] for k in keys if k in payload),"")
+        if not isinstance(value,str) or not value.strip():
+            raise ValueError(f"{keys[0]} must be a nonempty string")
+        return value.strip()
 
     def do_OPTIONS(self) -> None:
-        """Handle CORS preflight requests."""
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self._set_cors_headers()
-        self.end_headers()
+        if self._authorized(preflight=True):
+            self._send(200,{"status":"ok"})
 
     def do_GET(self) -> None:
-        """Handle GET requests for /health, /entries, and /primer."""
-        parsed_url = urlparse(self.path)
-        parsed_path = parsed_url.path
-
-        if parsed_path in ("/", "/health", "/status"):
-            count = self.server.db.count_entries()
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "healthy",
-                "app": "OwlThread",
-                "total_entries": count
-            })
+        if not self._authorized():
             return
-
-        if parsed_path == "/entries":
-            entries = self.server.db.get_entries(limit=20)
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "count": len(entries),
-                "entries": entries
-            })
-            return
-
-        if parsed_path in ("/primer", "/query"):
-            qs = parse_qs(parsed_url.query)
-            query_list = qs.get("q") or qs.get("query") or []
-            if not query_list or not query_list[0].strip():
-                self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                    "error": "Query parameter 'q' or 'query' is required."
-                })
-                return
-
-            query = query_list[0].strip()
-            intent_override = qs.get("intent", [None])[0]
-            include_history = qs.get("include_history", ["false"])[0].lower() in ("true", "1")
-            result = self.server.primer_engine.generate_primer(
-                user_request=query,
-                intent_override=intent_override,
-                include_history=include_history,
-            )
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                **result.to_dict()
-            })
-            return
-
-        if parsed_path == "/settings":
-            settings = self.server.db.get_all_settings()
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "settings": settings
-            })
-            return
-
-        if parsed_path in ("/projects", "/api/projects"):
-            active_project = self.server.db.get_setting("active_project", "General")
-            projects = [p["name"] for p in self.server.db.list_projects()]
-            if "General" not in projects:
-                projects.insert(0, "General")
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "active_project": active_project,
-                "projects": projects
-            })
-            return
-
-        if parsed_path == "/state":
-            is_paused = getattr(self.server, "is_paused", False)
-            active_project = self.server.db.get_setting("active_project", "General")
-            llm_provider = self.server.db.get_setting("llm_provider", "fallback")
-            llm_model = self.server.db.get_setting("llm_model", "gemini-2.0-flash")
-            has_api_key = bool(self.server.db.get_setting("llm_api_key", ""))
-            projects = [p["name"] for p in self.server.db.list_projects()]
-            if "General" not in projects:
-                projects.insert(0, "General")
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "is_paused": is_paused,
-                "total_entries": self.server.db.count_entries(),
-                "active_project": active_project,
-                "projects": projects,
-                "ai_provider": llm_provider,
-                "ai_model": llm_model,
-                "has_api_key": has_api_key,
-            })
-            return
-
-        if parsed_path == "/sites":
-            sites_json = self.server.db.get_setting("site_permissions", "{}")
-            try:
-                sites_data = json.loads(sites_json) if sites_json else {}
-            except Exception:
-                sites_data = {}
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "sites": sites_data
-            })
-            return
-
-        self._send_json_response(HTTPStatus.NOT_FOUND, {
-            "error": "Not Found",
-            "path": parsed_path
-        })
+        try:
+            url = urlsplit(self.path)
+            query = parse_qs(url.query)
+            if url.path == "/health":
+                self._send(200,{"status":"healthy","app":"OwlThread"})
+            elif url.path in {"/","/status","/state"}:
+                status = self.server.status_callback() if self.server.status_callback else {}
+                self._send(200,{"status":"healthy","app":"OwlThread",**status,
+                               "total_entries":self.server.db.count_entries(),"pending_captures":self.server.db.pending_count()})
+            elif url.path == "/entries":
+                quadrant = query.get("quadrant",[None])[0]
+                if quadrant is not None and quadrant not in VALID_QUADRANTS:
+                    raise ValueError("Invalid quadrant")
+                fields = {k:v[0] for k,v in query.items()}
+                if "project_id" in fields:
+                    if not fields["project_id"].isdigit():
+                        raise ValueError("Invalid project_id")
+                    fields["project_id"] = int(fields["project_id"])
+                rows = self.server.db.get_entries(project_id=self._project(fields),quadrant=quadrant,limit=self._limit(query.get("limit",[None])[0]))
+                self._send(200,{"entries":rows,"count":len(rows)})
+            elif url.path in {"/primer","/query"}:
+                fields = {k:v[0] for k,v in query.items()}
+                text = self._text(fields,"q","query")
+                if len(text)>4000: raise ValueError("Query exceeds 4000 characters")
+                if "project_id" in fields:
+                    if not fields["project_id"].isdigit(): raise ValueError("Invalid project_id")
+                    fields["project_id"] = int(fields["project_id"])
+                self._send(200,{"status":"ok",**self.server.primer_engine.generate_primer(text,project_id=self._project(fields)).to_dict()})
+            elif url.path == "/projects":
+                self._send(200,{"projects":self.server.db.list_projects()})
+            else:
+                self._send(404,{"error":"Not found"})
+        except (ValueError,TypeError) as exc:
+            self._send(400,{"error":str(exc)})
+        except Exception:
+            logger.exception("HTTP read failed")
+            self._send(500,{"error":"Local operation failed; inspect application logs"})
 
     def do_POST(self) -> None:
-        """Handle POST /capture, POST /primer, and POST /flush requests."""
-        parsed_path = self.path.split("?")[0]
-
-        if parsed_path in ("/primer", "/query"):
-            self._handle_primer_post()
+        if not self._authorized():
             return
-
-        if parsed_path in ("/flush", "/done", "/ship"):
-            self._handle_flush_post()
-            return
-
-        if parsed_path == "/settings":
-            self._handle_settings_post()
-            return
-
-        if parsed_path == "/sites":
-            self._handle_sites_post()
-            return
-
-        if parsed_path == "/state":
-            self._handle_state_post()
-            return
-
-        if parsed_path in ("/projects", "/api/projects"):
-            self._handle_projects_post()
-            return
-
-        if parsed_path in ("/test-ai", "/api/test-ai"):
-            self._handle_test_ai_post()
-            return
-
-        if parsed_path in ("/delete-entry", "/delete"):
-            self._handle_delete_entry_post()
-            return
-
-        if parsed_path == "/reset":
-            self.server.db.clear_entries()
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "message": "Database cleared successfully."
-            })
-            return
-
-        if parsed_path != "/capture":
-            self._send_json_response(HTTPStatus.NOT_FOUND, {
-                "error": "Endpoint not found"
-            })
-            return
-
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length <= 0:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Empty request body"
-            })
-            return
-
         try:
-            body_bytes = self.rfile.read(content_length)
-            body_str = body_bytes.decode("utf-8", errors="ignore")
-            payload = json.loads(body_str)
-        except Exception as e:
-            logger.error("Failed to parse JSON body: %s", e)
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": f"Invalid JSON payload: {str(e)}"
-            })
-            return
-
-        raw_text = payload.get("text") or payload.get("raw_text") or ""
-        if not raw_text or not raw_text.strip():
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Field 'text' or 'raw_text' is required and must not be empty."
-            })
-            return
-
-        source_app = payload.get("source_app") or SOURCE_BROWSER
-        active_project = self.server.db.get_setting("active_project", "General")
-        req_project = payload.get("project_name") or payload.get("project")
-        if req_project and str(req_project).strip() and str(req_project).strip() != "General":
-            project_name = str(req_project).strip()
-        else:
-            project_name = active_project or "General"
-
-        root_path = payload.get("root_path")
-        timestamp = payload.get("timestamp")
-        url = payload.get("url")
-        title = payload.get("title")
-        extra_meta = payload.get("metadata", {})
-
-        domain = extra_meta.get("hostname")
-        if not domain and url and "://" in url:
-            try:
-                domain = url.split("/")[2].split(":")[0]
-            except Exception:
-                domain = None
-
-        source_metadata = {
-            "source": "browser_extension",
-            "url": url,
-            "title": title,
-            "domain": domain,
-            **extra_meta
-        }
-
-        try:
-            # 1. Ingest into extraction pipeline (buffers per project + source_app)
-            extracted_items = self.server.pipeline.ingest_capture(
-                raw_text=raw_text,
-                source_app=source_app,
-                project_name=project_name,
-                root_path=root_path,
-                timestamp=timestamp
-            )
-
-            # 2. Immediate lightweight classification for instant rich card & vault entries
-            quick_quad, quick_sum = self.server.pipeline.extractor.quick_classify(raw_text)
-
-            project_id = self.server.db.get_or_create_project(name=project_name, root_path=root_path)
-            entry_id = self.server.db.insert_entry(
-                raw_text=raw_text,
-                source_app=source_app,
-                project_id=project_id,
-                source_metadata=source_metadata,
-                timestamp=timestamp,
-                quadrant=quick_quad,
-                summary=quick_sum,
-                status="active"
-            )
-
-            logger.info("Captured entry #%d [%s] from %s: %s", entry_id, quick_quad, source_app, quick_sum)
-
-            entry_data = {
-                "id": entry_id,
-                "project_id": project_id,
-                "project_name": project_name or "General",
-                "source_app": source_app,
-                "raw_text": raw_text,
-                "timestamp": timestamp,
-                "source_metadata": source_metadata,
-                "quadrant": quick_quad,
-                "summary": quick_sum,
-                "extracted_count": len(extracted_items),
-                "extracted_items": extracted_items,
-            }
-            if hasattr(self.server, "notify_capture"):
-                self.server.notify_capture(entry_data)
-
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "id": entry_id,
-                "project_id": project_id,
-                "extracted_count": len(extracted_items),
-                "extracted_items": extracted_items,
-                "message": "Captured and buffered successfully"
-            })
-        except Exception as e:
-            logger.error("Error processing capture entry: %s", e)
-            self._send_json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {
-                "error": f"Capture processing failed: {str(e)}"
-            })
-
-    def _handle_primer_post(self) -> None:
-        """Handle POST /primer requests."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length <= 0:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Empty request body"
-            })
-            return
-
-        try:
-            body_bytes = self.rfile.read(content_length)
-            body_str = body_bytes.decode("utf-8", errors="ignore")
-            payload = json.loads(body_str)
-        except Exception as e:
-            logger.error("Failed to parse JSON body for primer: %s", e)
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": f"Invalid JSON payload: {str(e)}"
-            })
-            return
-
-        query = payload.get("query") or payload.get("request") or payload.get("text") or ""
-        if not query or not query.strip():
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Field 'query' or 'request' is required."
-            })
-            return
-
-        intent_override = payload.get("intent")
-        search_limit = int(payload.get("limit", 12))
-        auto_copy = bool(payload.get("copy", True))
-        include_history = bool(payload.get("include_history", False))
-        project_id = payload.get("project_id")
-
-        try:
-            result = self.server.primer_engine.generate_primer(
-                user_request=query.strip(),
-                intent_override=intent_override,
-                search_limit=search_limit,
-                auto_copy=auto_copy,
-                include_history=include_history,
-                project_id=project_id,
-            )
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                **result.to_dict()
-            })
-        except Exception as e:
-            logger.exception("Error generating primer: %s", e)
-            self._send_json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {
-                "error": f"Primer generation failed: {str(e)}"
-            })
-
-    def _handle_flush_post(self) -> None:
-        """Handle POST /flush or /done requests."""
-        try:
-            result = self.server.pipeline.handle_done_signal()
-            self._send_json_response(HTTPStatus.OK, result)
-        except Exception as e:
-            logger.exception("Error handling flush/done signal: %s", e)
-            self._send_json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {
-                "error": f"Flush failed: {str(e)}"
-            })
-
-    def _handle_settings_post(self) -> None:
-        """Handle POST /settings requests — save user-customizable prompts and config."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length <= 0:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Empty request body"
-            })
-            return
-
-        try:
-            body_bytes = self.rfile.read(content_length)
-            body_str = body_bytes.decode("utf-8", errors="ignore")
-            payload = json.loads(body_str)
-        except Exception as e:
-            logger.error("Failed to parse JSON body for settings: %s", e)
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": f"Invalid JSON payload: {str(e)}"
-            })
-            return
-
-        if not isinstance(payload, dict):
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Settings payload must be a JSON object with key-value pairs."
-            })
-            return
-
-        # Valid settings keys
-        allowed_keys = {
-            "extraction_prompt",
-            "primer_prompt",
-            "llm_provider",
-            "llm_api_key",
-            "llm_model",
-            "llm_base_url",
-            "active_project",
-        }
-        saved_keys = []
-
-        for key, value in payload.items():
-            if key not in allowed_keys:
-                continue
-            if not isinstance(value, str):
-                continue
-            self.server.db.set_setting(key, value.strip())
-            saved_keys.append(key)
-
-        # Reload prompts into pipeline if extraction/primer prompts were updated
-        if "extraction_prompt" in saved_keys:
-            custom = self.server.db.get_setting("extraction_prompt")
-            if custom:
-                self.server.pipeline.extractor.custom_system_prompt = custom
-        if "primer_prompt" in saved_keys:
-            custom = self.server.db.get_setting("primer_prompt")
-            if custom:
-                self.server.primer_engine.generator.custom_system_prompt = custom
-
-        # Reload LLM clients if any AI keys were changed
-        if any(k.startswith("llm_") for k in saved_keys):
-            self.server.pipeline.extractor.llm_client.reload_from_db(self.server.db)
-            self.server.primer_engine.generator.llm_client.reload_from_db(self.server.db)
-
-        self._send_json_response(HTTPStatus.OK, {
-            "status": "ok",
-            "saved_keys": saved_keys,
-            "message": f"Saved {len(saved_keys)} setting(s)."
-        })
-
-    def _handle_sites_post(self) -> None:
-        """Handle POST /sites requests — store or update domain permissions."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length <= 0:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": "Empty request body"})
-            return
-
-        try:
-            body_bytes = self.rfile.read(content_length)
-            payload = json.loads(body_bytes.decode("utf-8", errors="ignore"))
-        except Exception as e:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON: {e}"})
-            return
-
-        if not isinstance(payload, dict):
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": "Payload must be a JSON object"})
-            return
-
-        hostname = payload.get("hostname")
-        status = payload.get("status")  # "allowed" or "blocked"
-        if not hostname or status not in ("allowed", "blocked"):
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {
-                "error": "Both 'hostname' and 'status' ('allowed' or 'blocked') are required."
-            })
-            return
-
-        sites_json = self.server.db.get_setting("site_permissions", "{}")
-        try:
-            sites_data = json.loads(sites_json) if sites_json else {}
+            path = urlsplit(self.path).path
+            payload = self._payload()
+            if path == "/pair":
+                origin = self.headers.get("Origin", "")
+                if not EXTENSION_ORIGIN.fullmatch(origin):
+                    raise ValueError("Pairing requires an extension origin")
+                def pair(conn: Any) -> None:
+                    row = conn.execute("SELECT value FROM settings WHERE key='authorized_origins'").fetchone()
+                    origins = set(json.loads(row[0])) if row else set()
+                    origins.add(origin)
+                    conn.execute("""INSERT INTO settings(key,value,updated_at) VALUES('authorized_origins',?,?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                        (json.dumps(sorted(origins)), get_iso_now()))
+                self.server.db.execute_write(pair)
+                self._send(200,{"status":"paired"})
+            elif path == "/context":
+                page_url = web_url(payload.get("url", ""))
+                if is_hard_blocked_url(page_url):
+                    raise ValueError("OwlThread is permanently disabled for this site")
+                result = self.server.page_intelligence.describe_page(payload)
+                self._send(200,{"status":"ok",**result})
+            elif path in {"/capture","/capture-smart"}:
+                if self.server.is_paused or self.server.db.get_setting("capture_paused","false") == "true":
+                    self._send(409,{"error":"Capture is paused"})
+                    return
+                text = self._text(payload,"text","raw_text")
+                if len(text) > (12000 if path == "/capture-smart" else MAX_CAPTURE):
+                    raise ValueError("Capture exceeds the allowed size")
+                source = payload.get("source",payload.get("source_app","browser_extension"))
+                if not isinstance(source,str) or not source.strip() or len(source)>80:
+                    raise ValueError("Invalid source")
+                metadata = {}
+                for key,maximum in (("platform",80),("url",2048),("title",500),("capture_mode",20),
+                                    ("capture_kind",80),("conversation_id",500),("turn_key",128)):
+                    if key in payload:
+                        if not isinstance(payload[key],str) or len(payload[key]) > maximum:
+                            raise ValueError("Invalid capture metadata")
+                        metadata[key] = web_url(payload[key]) if key == "url" else payload[key]
+                if is_hard_blocked_url(metadata.get("url")):
+                    raise ValueError("OwlThread is permanently disabled for this site")
+                dedup = payload.get("dedup_key")
+                if dedup is not None and (not isinstance(dedup,str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",dedup)):
+                    raise ValueError("Invalid dedup_key")
+                pid = self._project(payload)
+                if path == "/capture-smart":
+                    assessment = self.server.page_intelligence.assess_capture(text,metadata)
+                    if not assessment["important"]:
+                        self._send(200,{"status":"skipped","accepted":False,**assessment})
+                        return
+                cid = self.server.db.insert_capture(text,source,pid,metadata,dedup_key=dedup)
+                for callback in self.server.capture_callbacks:
+                    try:
+                        callback({"id":cid,"raw_text":text,"source_app":source,"project_id":pid})
+                    except Exception:
+                        logger.exception("Capture callback failed")
+                self._send(200,{"status":"ok","stage":"buffered" if cid else "duplicate","accepted":True,"id":cid,"capture_id":cid,"project_id":pid})
+            elif path in {"/primer","/query"}:
+                text = self._text(payload,"query","request")
+                if len(text) > 4000:
+                    raise ValueError("Query exceeds 4000 characters")
+                pid = self._project(payload)
+                history = payload.get("include_history",False)
+                if not isinstance(history,bool):
+                    raise ValueError("include_history must be boolean")
+                result = self.server.primer_engine.generate_primer(text,intent_override=payload.get("intent"),
+                    search_limit=self._limit(payload.get("limit"),12),include_history=history,project_id=pid)
+                self._send(200,{"status":"ok",**result.to_dict()})
+            elif path in {"/flush","/done","/ship"}:
+                result = self.server.pipeline.handle_done_signal()
+                self._send(200,result)
+            else:
+                self._send(404,{"error":"Not found"})
+        except (ValueError,TypeError,UnicodeError) as exc:
+            self._send(400,{"error":str(exc)})
+        except (TimeoutError,OSError):
+            logger.debug("HTTP request timed out or disconnected")
         except Exception:
-            sites_data = {}
-
-        sites_data[hostname] = status
-        self.server.db.set_setting("site_permissions", json.dumps(sites_data))
-
-        self._send_json_response(HTTPStatus.OK, {
-            "status": "ok",
-            "hostname": hostname,
-            "permission": status,
-            "all_sites": sites_data,
-        })
-
-    def _handle_state_post(self) -> None:
-        """Handle POST /state requests — update global capture pause or active project status."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        try:
-            body_bytes = self.rfile.read(content_length)
-            payload = json.loads(body_bytes.decode("utf-8", errors="ignore"))
-        except Exception as e:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON: {e}"})
-            return
-
-        if isinstance(payload, dict):
-            if "is_paused" in payload:
-                self.server.is_paused = bool(payload["is_paused"])
-            if "active_project" in payload:
-                proj = str(payload["active_project"]).strip()
-                if proj:
-                    self.server.db.get_or_create_project(name=proj)
-                    self.server.db.set_setting("active_project", proj)
-
-        active_project = self.server.db.get_setting("active_project", "General")
-        projects = [p["name"] for p in self.server.db.list_projects()]
-        if "General" not in projects:
-            projects.insert(0, "General")
-
-        self._send_json_response(HTTPStatus.OK, {
-            "status": "ok",
-            "is_paused": getattr(self.server, "is_paused", False),
-            "active_project": active_project,
-            "projects": projects
-        })
-
-    def _handle_projects_post(self) -> None:
-        """Handle POST /projects requests — switch or create active project."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length <= 0:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": "Empty body"})
-            return
-        try:
-            body_bytes = self.rfile.read(content_length)
-            payload = json.loads(body_bytes.decode("utf-8", errors="ignore"))
-        except Exception as e:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON: {e}"})
-            return
-
-        if not isinstance(payload, dict):
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": "Payload must be JSON object"})
-            return
-
-        project_name = (payload.get("name") or payload.get("project") or payload.get("active_project") or "").strip()
-        if not project_name:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": "Project name is required"})
-            return
-
-        self.server.db.get_or_create_project(name=project_name)
-        self.server.db.set_setting("active_project", project_name)
-
-        projects = [p["name"] for p in self.server.db.list_projects()]
-        if "General" not in projects:
-            projects.insert(0, "General")
-
-        self._send_json_response(HTTPStatus.OK, {
-            "status": "ok",
-            "active_project": project_name,
-            "projects": projects,
-            "message": f"Active project switched to '{project_name}'"
-        })
-
-    def _handle_test_ai_post(self) -> None:
-        """Handle POST /test-ai requests — ping active AI connection."""
-        try:
-            client = self.server.pipeline.extractor.llm_client
-            ok, msg = client.test_connection()
-            self._send_json_response(HTTPStatus.OK, {
-                "status": "ok",
-                "success": ok,
-                "message": msg,
-                "provider": client.provider,
-                "model": client.model,
-            })
-        except Exception as e:
-            self._send_json_response(HTTPStatus.INTERNAL_SERVER_ERROR, {
-                "status": "error",
-                "success": False,
-                "message": str(e),
-            })
-
-    def _handle_delete_entry_post(self) -> None:
-        """Handle POST /delete-entry requests — delete a memory entry by ID."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        try:
-            body_bytes = self.rfile.read(content_length)
-            payload = json.loads(body_bytes.decode("utf-8", errors="ignore"))
-        except Exception as e:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON: {e}"})
-            return
-
-        entry_id = payload.get("id") if isinstance(payload, dict) else None
-        if not entry_id:
-            self._send_json_response(HTTPStatus.BAD_REQUEST, {"error": "Missing entry 'id'"})
-            return
-
-        success = self.server.db.delete_entry(int(entry_id))
-        self._send_json_response(HTTPStatus.OK, {
-            "status": "ok",
-            "id": entry_id,
-            "deleted": success
-        })
-
-    def log_message(self, format: str, *args) -> None:
-        """Suppress default stdout logging or redirect to logger."""
-        logger.debug("%s - - [%s] %s", self.address_string(), self.log_date_time_string(), format % args)
+            logger.exception("HTTP operation failed")
+            self._send(500,{"error":"Local operation failed; inspect application logs"})
 
 
 class CaptureHTTPServer(ThreadingHTTPServer):
-    """Custom ThreadingHTTPServer holding reference to Database, Pipeline, and PrimerEngine."""
+    daemon_threads = True
+    allow_reuse_address = True
 
-    def __init__(self, server_address, RequestHandlerClass, db: Database):
+    def __init__(self, address: tuple[str,int], db: Database, pipeline: ExtractionPipeline | None = None) -> None:
+        if address[0] != DEFAULT_HTTP_HOST:
+            raise ValueError("OwlThread only listens on 127.0.0.1")
         self.db = db
-        self.pipeline = ExtractionPipeline(db=self.db)
-        self.primer_engine = PrimerEngine(db=self.db, extraction_pipeline=self.pipeline)
-        self.capture_callbacks: List[Any] = []
-        # Load user-saved custom prompts from settings
-        custom_extraction = self.db.get_setting("extraction_prompt")
-        if custom_extraction:
-            self.pipeline.extractor.custom_system_prompt = custom_extraction
-        custom_primer = self.db.get_setting("primer_prompt")
-        if custom_primer:
-            self.primer_engine.generator.custom_system_prompt = custom_primer
-        super().__init__(server_address, RequestHandlerClass)
+        self.pipeline = pipeline or ExtractionPipeline(db)
+        self.primer_engine = PrimerEngine(db,extraction_pipeline=self.pipeline)
+        self.page_intelligence = PageIntelligence(db,self.pipeline.llm_client)
+        self.capture_callbacks: list[Callable[[dict[str,Any]],None]] = []
+        self.status_callback: Callable[[],dict[str,Any]] | None = None
+        self.is_paused = False
+        local_token(db)
+        self._rate_lock = threading.Lock()
+        self._requests: deque[float] = deque()
+        self.rate_limit = 120
+        self._slots = threading.BoundedSemaphore(16)
+        super().__init__(address,CaptureRequestHandler)
 
-    def add_capture_callback(self, callback: Any) -> None:
-        """Register a callback invoked when a new capture entry arrives."""
-        if callback not in self.capture_callbacks:
-            self.capture_callbacks.append(callback)
+    def origin_allowed(self, origin: str) -> bool:
+        try:
+            return origin in json.loads(self.db.get_setting("authorized_origins", "[]"))
+        except (ValueError,TypeError):
+            return False
 
-    def remove_capture_callback(self, callback: Any) -> None:
-        """Unregister a capture callback."""
-        if callback in self.capture_callbacks:
-            self.capture_callbacks.remove(callback)
+    def allow_request(self) -> bool:
+        with self._rate_lock:
+            now = time.monotonic()
+            while self._requests and now - self._requests[0] >= 60:
+                self._requests.popleft()
+            if len(self._requests) >= self.rate_limit:
+                return False
+            self._requests.append(now)
+            return True
 
-    def notify_capture(self, entry_data: Dict[str, Any]) -> None:
-        """Notify all registered listeners about a new capture."""
-        for cb in list(self.capture_callbacks):
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
             try:
-                cb(entry_data)
-            except Exception as e:
-                logger.debug("Error in capture listener: %s", e)
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request,client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request,client_address)
+        finally:
+            self._slots.release()
 
 
 class LocalHttpListener:
-    """
-    Local HTTP Listener for OwlThread.
-    
-    Bound strictly to localhost (127.0.0.1) with no external network exposure.
-    """
-
-    def __init__(
-        self,
-        db: Database,
-        host: str = DEFAULT_HTTP_HOST,
-        port: int = DEFAULT_HTTP_PORT
-    ):
-        self.db = db
-        self.host = "127.0.0.1" if host in ("0.0.0.0", "", "localhost") else host
-        self.port = port
-        self._server: Optional[CaptureHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
-        self._is_running = False
-        self._callbacks: List[Any] = []
-
-    def add_capture_callback(self, callback: Any) -> None:
-        """Register a capture callback."""
-        if callback not in self._callbacks:
-            self._callbacks.append(callback)
-        if self._server:
-            self._server.add_capture_callback(callback)
-
-    def remove_capture_callback(self, callback: Any) -> None:
-        """Unregister a capture callback."""
-        if callback in self._callbacks:
-            self._callbacks.remove(callback)
-        if self._server:
-            self._server.remove_capture_callback(callback)
+    def __init__(self, db: Database, host: str = DEFAULT_HTTP_HOST, port: int = DEFAULT_HTTP_PORT,
+                 pipeline: ExtractionPipeline | None = None) -> None:
+        self.db,self.host,self.port = db,host,port
+        self.pipeline = pipeline or ExtractionPipeline(db)
+        self._server: CaptureHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._callbacks: list[Callable[[dict[str,Any]],None]] = []
+        self.status_callback: Callable[[],dict[str,Any]] | None = None
 
     @property
     def is_running(self) -> bool:
-        """Return True if server is listening."""
-        return self._is_running
+        return bool(self._thread and self._thread.is_alive())
+
+    def add_capture_callback(self, callback: Callable[[dict[str,Any]],None]) -> None:
+        self._callbacks.append(callback)
+        if self._server:
+            self._server.capture_callbacks = self._callbacks
 
     def start(self) -> None:
-        """Start the HTTP server on a daemon thread."""
-        if self._is_running:
+        if self.is_running:
             return
-
-        try:
-            self._server = CaptureHTTPServer((self.host, self.port), CaptureRequestHandler, self.db)
-            for cb in self._callbacks:
-                self._server.add_capture_callback(cb)
-            self._is_running = True
-            self._thread = threading.Thread(
-                target=self._server.serve_forever,
-                name="OwlThread-HttpServer",
-                daemon=True
-            )
-            self._thread.start()
-            logger.info("LocalHttpListener started on http://%s:%d", self.host, self.port)
-        except Exception as e:
-            self._is_running = False
-            logger.error("Failed to start HTTP server on %s:%d: %s", self.host, self.port, e)
-            raise
+        self._server = CaptureHTTPServer((self.host,self.port),self.db,self.pipeline)
+        self._server.capture_callbacks = self._callbacks
+        self._server.status_callback = self.status_callback
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever,kwargs={"poll_interval":0.1},daemon=True,name="OwlThread-HTTP")
+        self._thread.start()
 
     def stop(self) -> None:
-        """Stop and shutdown the HTTP server."""
-        if not self._is_running:
-            return
-
-        self._is_running = False
         if self._server:
             self._server.shutdown()
             self._server.server_close()
+            if self._thread:
+                self._thread.join()
+            # Wait for in-flight requests before the owner closes its database.
+            for _ in range(16):
+                self._server._slots.acquire()
             self._server = None
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-        logger.info("LocalHttpListener stopped.")

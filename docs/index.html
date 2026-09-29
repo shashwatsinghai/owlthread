@@ -6,8 +6,6 @@
     <title>OwlThread - Ambient Memory for Builders</title>
     <meta name="description" content="OwlThread is an ambient memory engine for builders who hate losing context.">
     <link rel="stylesheet" href="style.css">
-    <!-- Google Fonts for a modern look (Inter or similar) -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <header class="hero section fade-in">
@@ -16,10 +14,10 @@
                 <div class="logo-emoji">🦉</div>
                 <h1 class="title">OwlThread</h1>
                 <h2 class="tagline">Ambient Memory for Builders</h2>
-                <p class="subtitle">OwlThread continuously captures your workflow, extracts vital context, and primes your environment so you never lose your train of thought again.</p>
+                <p class="subtitle">Save useful project context, organize durable facts, and get a cited brief for your next task. Version 1.5.0 is a local release candidate.</p>
                 <div class="cta-group">
                     <a href="#quickstart" class="btn btn-primary">Get Started</a>
-                    <a href="https://github.com/owlthread/owlthread" class="btn btn-secondary">GitHub</a>
+                    <a href="../README.md" class="btn btn-secondary">Documentation</a>
                 </div>
             </div>
         </div>
@@ -32,12 +30,12 @@
                 <div class="step-card">
                     <div class="step-icon">🔍</div>
                     <h3>1. Capture</h3>
-                    <p>Reads your workflow across browser, cursor, and clipboard silently in the background.</p>
+                    <p>Choose browser notes, CLI captures or opt-in clipboard and experimental IDE sources.</p>
                 </div>
                 <div class="step-card">
                     <div class="step-icon">🧠</div>
                     <h3>2. Extract</h3>
-                    <p>Organizes raw context into a 4-quadrant memory system using local LLMs.</p>
+                    <p>Extracts supported facts with local rules or a provider you configure, preserving source and history.</p>
                 </div>
                 <div class="step-card">
                     <div class="step-icon">⚡</div>
@@ -53,36 +51,36 @@
             <h2 class="section-title">Features</h2>
             <div class="features-grid">
                 <div class="feature-card">
-                    <h3>100% Free & Open-Source</h3>
-                    <p>No monthly subscriptions, no paywalls. Clone from GitHub and hack on it freely.</p>
+                    <h3>MIT-licensed source</h3>
+                    <p>OwlThread has no subscription. Optional remote model providers may charge for requests.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Fully Customizable Prompts</h3>
                     <p>Tailor the extraction and priming logic directly from the UI to match your stack.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Zero API Keys Needed</h3>
-                    <p>Run completely offline with local Ollama models (Llama 3, DeepSeek-R1) or offline heuristics.</p>
+                    <h3>Local fallback available</h3>
+                    <p>Use local rules without a provider key, or configure your own local Ollama installation.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Browser Extension</h3>
-                    <p>Seamlessly tracks research and docs without breaking your flow.</p>
+                    <p>Save selected passages with a small companion. Page understanding runs only when requested.</p>
                 </div>
                 <div class="feature-card">
                     <h3>4-Quadrant Memory</h3>
-                    <p>Classifies context by urgency and relevance for smart retrieval.</p>
+                    <p>Organizes architecture, business rules, settled decisions and open questions.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Privacy-First</h3>
-                    <p>Everything lives locally in a SQLite database. Your data never leaves your machine.</p>
+                    <h3>Explicit privacy choices</h3>
+                    <p>Memory is stored in local SQLite. A remote model receives the context needed for your requested features.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Pluggable Connectors</h3>
-                    <p>Easily build plugins for GitHub, Cloudflare, or Jira using our simple Python interface.</p>
+                    <h3>Experimental IDE connectors</h3>
+                    <p>Opt-in Cursor and VS Code chat-store readers have fixture coverage. Changing live formats may need manual capture.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Query & Primer Engine</h3>
-                    <p>State your task, get instant 1-click tailored context briefs for Cursor, Claude, or ChatGPT.</p>
+                    <p>State your task and copy a project-scoped brief with memory references into your editor or chat.</p>
                 </div>
             </div>
         </div>
@@ -95,10 +93,10 @@
                 <pre><code>Browser / Cursor / Clipboard 
          │
          ▼
-[ Capture Server ] ──► [ Buffer Manager ]
+[ Capture Server ] ──► [ SQLite Capture Buffer ]
                               │
                               ▼
-                      [ LLM Extractor ]
+                      [ Validated Extraction ]
                               │
                               ▼
                      [ SQLite Memory ]
@@ -122,7 +120,7 @@ pip install -e .
 # Start the background daemon
 owlthread start
 
-# Load the browser extension and you're ready!</code></pre>
+# Load the extension, pair in Settings, and choose a project.</code></pre>
             </div>
         </div>
     </section>
@@ -131,7 +129,7 @@ owlthread start
         <div class="container">
             <p>Built for builders who hate losing context.</p>
             <div class="footer-links">
-                <a href="https://github.com/owlthread/owlthread">GitHub</a>
+                <a href="../README.md">Documentation</a>
                 <span>&bull;</span>
                 <span>MIT License</span>
             </div>

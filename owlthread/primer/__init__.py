@@ -1,5 +1,7 @@
 """OwlThread Query & Primer Engine package."""
 
+from __future__ import annotations
+
 from owlthread.primer.classifier import IntentClassifier
 from owlthread.primer.engine import PrimerEngine, PrimerResult, copy_to_clipboard
 from owlthread.primer.generator import PrimerGenerator
@@ -15,3 +17,6 @@ __all__ = [
     "LLMClient",
     "copy_to_clipboard",
 ]
+
+import logging
+logger = logging.getLogger(__name__)

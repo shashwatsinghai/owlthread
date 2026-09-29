@@ -19,6 +19,7 @@ class TestMemorySearcher(unittest.TestCase):
         self.searcher = MemorySearcher(self.db)
 
     def tearDown(self):
+        self.db.close()
         self.tmp_dir.cleanup()
 
     def test_extract_keywords(self):
@@ -27,7 +28,7 @@ class TestMemorySearcher(unittest.TestCase):
         self.assertIn("integrate", kw)
         self.assertIn("stripe", kw)
         self.assertIn("billing", kw)
-        self.assertIn("subscriptions", kw)
+        self.assertIn("subscription", kw)
         self.assertNotIn("want", kw)
         self.assertNotIn("for", kw)
 
@@ -39,13 +40,13 @@ class TestMemorySearcher(unittest.TestCase):
             raw_text="Configured Stripe API webhook and billing customer portal.",
             source_app="cursor",
             timestamp=now,
-            quadrant="decisions"
+            quadrant="settled_decisions"
         )
         id2 = self.db.insert_entry(
             raw_text="Updated CSS color palette for dark theme in main app layout.",
             source_app="clipboard",
             timestamp=now,
-            quadrant="architecture"
+            quadrant="technical_architecture"
         )
 
         results = self.searcher.search("integrate Stripe billing")
@@ -63,13 +64,13 @@ class TestMemorySearcher(unittest.TestCase):
             raw_text="Audit update: verified security tokens and access keys.",
             source_app="cli",
             timestamp=old_ts,
-            quadrant="status"
+            quadrant="open_questions"
         )
         id_recent = self.db.insert_entry(
             raw_text="Audit update: verified security tokens and access keys.",
             source_app="cli",
             timestamp=recent_ts,
-            quadrant="status"
+            quadrant="open_questions"
         )
 
         results = self.searcher.search("audit update")
@@ -83,7 +84,7 @@ class TestMemorySearcher(unittest.TestCase):
     def test_search_across_quadrants(self):
         """Verify search surfaces entries across all four quadrants and NULL."""
         now = datetime.now(timezone.utc).isoformat()
-        quadrants = ["architecture", "decisions", "status", "context", None]
+        quadrants = ["technical_architecture", "settled_decisions", "open_questions", "business_rules", None]
         for q in quadrants:
             self.db.insert_entry(
                 raw_text=f"Stripe payment integration note in quadrant {q}",

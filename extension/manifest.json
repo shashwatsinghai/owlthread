@@ -1,64 +1,85 @@
 {
   "manifest_version": 3,
-  "name": "OwlThread Capture",
-  "version": "0.3.5",
-  "description": "Ambient in-page memory capture with floating Owl assistant and quick actions.",
+  "name": "OwlThread",
+  "version": "1.5.0",
+  "minimum_chrome_version": "110",
+  "description": "Your floating owl companion. Save current pages and complete new AI turns to local memory.",
   "permissions": [
     "activeTab",
-    "alarms",
     "scripting",
     "storage",
-    "tabs"
+    "alarms"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*",
-    "<all_urls>"
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "exclude_matches": [
+        "*://*.youtube.com/*",
+        "*://*.youtu.be/*",
+        "*://*.netflix.com/*",
+        "*://*.primevideo.com/*",
+        "*://*.disneyplus.com/*",
+        "*://*.hotstar.com/*",
+        "*://*.hulu.com/*",
+        "*://*.twitch.tv/*",
+        "*://*.spotify.com/*",
+        "*://*.tiktok.com/*",
+        "*://*.instagram.com/*",
+        "*://*.facebook.com/*",
+        "*://*.x.com/*",
+        "*://*.twitter.com/*",
+        "*://*.reddit.com/*",
+        "*://*.snapchat.com/*",
+        "*://*.pinterest.com/*",
+        "*://*.vimeo.com/*",
+        "*://*.dailymotion.com/*",
+        "*://*.kick.com/*",
+        "*://*.soundcloud.com/*",
+        "*://*.discord.com/*"
+      ],
+      "js": [
+        "policy.js",
+        "content.js",
+        "companion.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": [
-        "icons/icon16.png",
-        "icons/icon32.png",
-        "icons/icon48.png",
-        "icons/icon128.png",
-        "icons/owl_logo.svg"
+        "assets/owl-cozy-developer.png"
       ],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
     }
   ],
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "OwlThread Capture",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "32": "icons/icon32.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
+    "default_popup": "popup/popup.html",
+    "default_title": "OwlThread"
   },
   "commands": {
     "capture_selection": {
       "suggested_key": {
-        "default": "Ctrl+Shift+O",
-        "mac": "Command+Shift+O"
+        "default": "Ctrl+Shift+O"
       },
-      "description": "Capture selection or active chat into OwlThread"
+      "description": "Capture the current page or current AI turn"
     }
   },
   "icons": {
     "16": "icons/icon16.png",
-    "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   }

@@ -68,14 +68,25 @@ class TestIntentClassifier(unittest.TestCase):
             self.assertEqual(intent, INTENT_OTHER, f"Failed for query: {query}")
 
     def test_classify_with_mock_llm(self):
-        """Verify LLM-based classification parsing."""
+        """Verify ambiguous requests can still use LLM-based classification."""
         mock_llm = MagicMock(spec=LLMClient)
+        mock_llm.is_available.return_value = True
         mock_llm.chat_complete.return_value = "dev_task"
         classifier = IntentClassifier(llm_client=mock_llm)
 
-        result = classifier.classify("integrate Stripe billing")
+        result = classifier.classify("please categorize this request")
         self.assertEqual(result, INTENT_DEV_TASK)
         mock_llm.chat_complete.assert_called_once()
+
+    def test_known_intent_does_not_spend_a_classifier_call(self):
+        mock_llm = MagicMock(spec=LLMClient)
+        mock_llm.is_available.return_value = True
+        classifier = IntentClassifier(llm_client=mock_llm)
+        self.assertEqual(classifier.classify("I am going to build a billing app"),INTENT_DEV_TASK)
+        mock_llm.chat_complete.assert_not_called()
+
+    def test_hinglish_build_intent(self):
+        self.assertEqual(self.classifier.classify("Main ek billing app banane ja raha hoon"),INTENT_DEV_TASK)
 
     def test_empty_query(self):
         """Empty queries should return 'other'."""

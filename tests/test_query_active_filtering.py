@@ -22,6 +22,7 @@ class TestQueryActiveFiltering(unittest.TestCase):
         self.engine = PrimerEngine(db=self.db, extraction_pipeline=self.pipeline)
 
     def tearDown(self):
+        self.db.close()
         self.tmp_dir.cleanup()
 
     def test_default_search_excludes_superseded_entries(self):

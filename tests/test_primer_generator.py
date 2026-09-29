@@ -16,11 +16,8 @@ class TestPrimerGenerator(unittest.TestCase):
     def test_system_prompt_content(self):
         """Verify primer-generation system prompt contains the exact specified text."""
         self.assertIn("OwlThread's Context Primer", PRIMER_SYSTEM_PROMPT)
-        self.assertIn("dev_task", PRIMER_SYSTEM_PROMPT)
-        self.assertIn("external_comms", PRIMER_SYSTEM_PROMPT)
-        self.assertIn("status_query", PRIMER_SYSTEM_PROMPT)
-        self.assertIn("other", PRIMER_SYSTEM_PROMPT)
-        self.assertIn("ONLY use information from the provided memory entries. Never invent facts.", PRIMER_SYSTEM_PROMPT)
+        self.assertIn("ONLY use the supplied memories", PRIMER_SYSTEM_PROMPT)
+        self.assertIn("untrusted data", PRIMER_SYSTEM_PROMPT)
 
     def test_generate_insufficient_memory(self):
         """Verify empty memory returns clear notice without hallucinating."""
@@ -29,7 +26,7 @@ class TestPrimerGenerator(unittest.TestCase):
             intent_tag="dev_task",
             matched_entries=[]
         )
-        self.assertIn("Insufficient memory recorded in OwlThread", res)
+        self.assertIn("Insufficient memory", res)
 
     def test_generate_dev_task_offline(self):
         """Verify dev_task synthesis formatting."""
@@ -39,7 +36,7 @@ class TestPrimerGenerator(unittest.TestCase):
                 "raw_text": "Selected Stripe Checkout over custom Elements for v1 MVP.",
                 "source_app": "cursor",
                 "timestamp": "2026-08-25T10:00:00Z",
-                "quadrant": "decisions",
+                "quadrant": "settled_decisions",
             }
         ]
         res = self.generator.generate(
@@ -47,7 +44,7 @@ class TestPrimerGenerator(unittest.TestCase):
             intent_tag="dev_task",
             matched_entries=entries
         )
-        self.assertIn("Technical Brief", res)
+        self.assertIn("Relevant Architecture Decisions", res)
         self.assertIn("Stripe Checkout", res)
 
     def test_generate_external_comms_offline(self):
@@ -58,7 +55,7 @@ class TestPrimerGenerator(unittest.TestCase):
                 "raw_text": "Completed core prototype showing 10x speedup in context retrieval.",
                 "source_app": "clipboard",
                 "timestamp": "2026-08-25T11:00:00Z",
-                "quadrant": "status",
+                "quadrant": "open_questions",
             }
         ]
         res = self.generator.generate(
@@ -66,8 +63,8 @@ class TestPrimerGenerator(unittest.TestCase):
             intent_tag="external_comms",
             matched_entries=entries
         )
-        self.assertIn("Executive Overview", res)
-        self.assertIn("Narrative Summary", res)
+        self.assertIn("Current Project Status", res)
+        self.assertIn("Key Achievements & Milestones", res)
 
     def test_generate_status_query_offline(self):
         """Verify status_query synthesis formatting."""
@@ -77,7 +74,7 @@ class TestPrimerGenerator(unittest.TestCase):
                 "raw_text": "Updated SQLite schema with WAL mode and connector indexing.",
                 "source_app": "cli",
                 "timestamp": "2026-08-25T11:30:00Z",
-                "quadrant": "architecture",
+                "quadrant": "technical_architecture",
             }
         ]
         res = self.generator.generate(
@@ -85,14 +82,14 @@ class TestPrimerGenerator(unittest.TestCase):
             intent_tag="status_query",
             matched_entries=entries
         )
-        self.assertIn("Status Query", res)
-        self.assertIn("Direct Status Answer", res)
+        self.assertIn("Technical Architecture", res)
+        self.assertIn("Open Questions", res)
 
     def test_generate_with_mock_llm(self):
         """Verify LLM client invocation with system and user prompts."""
         mock_llm = MagicMock(spec=LLMClient)
         mock_llm.is_available.return_value = True
-        mock_llm.chat_complete.return_value = "# Custom LLM Brief\nEverything is ready."
+        mock_llm.chat_complete.return_value = "# Custom LLM Brief\nTest memory [#1]."
 
         gen = PrimerGenerator(llm_client=mock_llm)
         entries = [{"id": 1, "raw_text": "Test memory", "source_app": "test", "timestamp": "2026-08-25"}]
@@ -102,8 +99,19 @@ class TestPrimerGenerator(unittest.TestCase):
             intent_tag="dev_task",
             matched_entries=entries
         )
-        self.assertEqual(res, "# Custom LLM Brief\nEverything is ready.")
+        self.assertEqual(res, "# Custom LLM Brief\nTest memory [#1].")
         mock_llm.chat_complete.assert_called_once()
+
+    def test_unknown_citations_and_unbounded_briefs_use_local_evidence(self):
+        mock_llm=MagicMock(spec=LLMClient)
+        mock_llm.is_available.return_value=True
+        gen=PrimerGenerator(mock_llm)
+        entries=[{'id':1,'summary':'Use SQLite WAL','quadrant':'technical_architecture'}]
+        for text in ('Unsupported statement [#999]','Uncited statement','word '*501+'[#1]'):
+            mock_llm.chat_complete.return_value=text
+            brief=gen.generate('SQLite task','dev_task',entries)
+            self.assertIn('Local synthesis',brief)
+            self.assertIn('Use SQLite WAL',brief)
 
 
 if __name__ == "__main__":

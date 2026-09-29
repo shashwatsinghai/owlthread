@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OwlThread</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+<header><span class="mark" aria-hidden="true"></span><span class="brand">OwlThread</span><span class="edition">YOUR MEMORY, CONNECTED</span></header>
+<main>
+  <div class="hero"><div><span class="eyebrow">LESS NOISE. MORE CONTEXT.</span><h1>Just the useful bits.</h1><p>A cozy companion for your next idea.</p></div><img src="../assets/owl-cozy-developer.png" width="60" height="76" alt="Cozy developer owl with code-bracket ears"></div>
+  <section class="connection" aria-label="Desktop connection"><div class="connection-heading"><span id="connection-dot" class="dot"></span><strong id="status" role="status">Checking desktop…</strong><button id="retry" class="text-button" aria-label="Reconnect desktop">Reconnect ↻</button></div><p id="model">Your API key and model live in the desktop app.</p></section>
+  <div class="stats"><div><strong id="memories">—</strong><span>Memories in app</span></div><div><strong id="pending">—</strong><span>To extract</span></div><div><strong id="queued">0</strong><span>Waiting here</span></div></div>
+  <div class="site-control"><div><label for="site-mode">ON THIS SITE</label><strong id="site-host" title="Current website">Finding your tab…</strong></div><select id="site-mode" disabled aria-describedby="site-hint"><option value="default">Smart default</option><option value="allowed">Allow owl</option><option value="blocked">Never here</option></select></div>
+  <p id="site-hint">Hard-blocked sites stay completely off; other pages support no-selection Remember.</p>
+  <button id="capture" class="primary"><span>Remember current turn / page</span><span aria-hidden="true">＋</span></button>
+  <div class="secondary-actions"><button id="show">Show owl on this page</button><button id="flush">Extract saved memories</button></div>
+  <details id="preferences"><summary>Preferences &amp; connection<span>Pair · project · capture</span></summary><div class="settings">
+    <label><span>Floating owl<small>A quiet, compact companion</small></span><input id="visible" type="checkbox" checked role="switch"></label>
+    <label><span>Natural movement<small>Respects reduced motion</small></span><input id="motion" type="checkbox" checked role="switch"></label>
+    <label><span>Filter new AI replies<small>ChatGPT · Claude · DeepSeek<br>Uses the model in OwlThread</small></span><input id="enabled" type="checkbox" checked role="switch"></label>
+    <p>Old chat history is skipped. New AI prompts are saved locally as soon as you send them; completed replies join the same turn. Remember works without selecting text.</p>
+  </div>
+  <details id="connection-settings"><summary>Connection settings<span>Pair &amp; choose project</span></summary>
+    <p>Copy the pairing secret from OwlThread desktop Settings.</p>
+    <label for="pair-token">Pairing secret</label><input id="pair-token" type="password" autocomplete="off" spellcheck="false">
+    <button id="pair">Pair with desktop</button>
+    <label for="capture-project">Save new captures to project</label><input id="capture-project" type="text" value="General" maxlength="100">
+    <button id="save-project">Save project choice</button>
+    <p>Queued captures keep the project selected when captured. Default: General.</p>
+  </details>
+  <details id="queue"><summary>Local capture queue<span>Review &amp; clear</span></summary><div id="queue-items"></div><button id="assign-legacy">Assign older notes to selected project</button><button id="clear-queue">Clear queued captures</button></details>
+  </details>
+  <details id="recent"><summary>Recent app memories<span>Shared across browsers</span></summary><div id="history" role="status">Open to load your latest memories.</div></details>
+  <p id="notice" role="status" aria-live="polite">Connecting to your memory…</p>
+</main>
+<footer><span>ONE APP · ALL YOUR NOTES</span><a href="../help.html" target="_blank" rel="noreferrer">Setup &amp; filter prompt ↗</a></footer>
+<script src="../policy.js"></script><script src="popup.js"></script>
+</body></html>

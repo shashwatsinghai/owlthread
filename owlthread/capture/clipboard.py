@@ -1,10 +1,10 @@
 """Windows Clipboard Watcher background service."""
 
-import ctypes
+from __future__ import annotations
+
 import hashlib
 import logging
 import threading
-import time
 from typing import Optional
 
 from owlthread.config import CLIPBOARD_POLL_INTERVAL, SOURCE_CLIPBOARD
@@ -13,71 +13,21 @@ from owlthread.db.database import Database
 logger = logging.getLogger(__name__)
 
 
-def _get_clipboard_text_win32() -> Optional[str]:
-    """Retrieve text from Windows clipboard using win32clipboard or ctypes."""
-    # Attempt 1: Try pywin32 win32clipboard
-    try:
-        import win32clipboard
-        import win32con
-
-        for _ in range(5):
-            try:
-                win32clipboard.OpenClipboard()
-                try:
-                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-                        data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-                        return data
-                    return None
-                finally:
-                    win32clipboard.CloseClipboard()
-            except Exception:
-                time.sleep(0.02)
-        return None
-    except ImportError:
-        pass
-
-    # Attempt 2: Fallback using ctypes
-    try:
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
-        CF_UNICODETEXT = 13
-
-        for _ in range(5):
-            if user32.OpenClipboard(None):
-                try:
-                    h_clip = user32.GetClipboardData(CF_UNICODETEXT)
-                    if h_clip:
-                        p_data = kernel32.GlobalLock(h_clip)
-                        if p_data:
-                            try:
-                                text = ctypes.c_wchar_p(p_data).value
-                                return text
-                            finally:
-                                kernel32.GlobalUnlock(h_clip)
-                    return None
-                finally:
-                    user32.CloseClipboard()
-            time.sleep(0.02)
-        return None
-    except Exception as e:
-        logger.debug("ctypes clipboard error: %s", e)
-        return None
+from owlthread.clipboard_io import read_clipboard as _get_clipboard_text_win32
 
 
 class ClipboardWatcher:
     """
     Background service polling Windows clipboard for text changes.
     
-    On change, writes a row to memory_entries (raw_text, source_app="clipboard", timestamp),
-    quadrant=NULL.
+    On change, durably saves the text to capture_buffer for later extraction.
     """
 
     def __init__(
         self,
         db: Database,
         poll_interval: float = CLIPBOARD_POLL_INTERVAL
-    ):
+    ) -> None:
         self.db = db
         self.poll_interval = poll_interval
         self._last_hash: Optional[str] = None
@@ -119,7 +69,7 @@ class ClipboardWatcher:
         self._is_running = False
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join()
         logger.info("ClipboardWatcher stopped.")
 
     def poll(self) -> Optional[int]:
@@ -130,26 +80,29 @@ class ClipboardWatcher:
             Inserted entry ID if new text was captured, None otherwise.
         """
         text = self._read_clipboard()
-        if not text or not text.strip():
+        if not text:
             return None
 
         current_hash = self._hash_text(text)
         if current_hash == self._last_hash:
             return None
-
+        # Advance before policy checks: text copied while paused/too short/self-produced
+        # must never become a stale capture on a later polling cycle.
         self._last_hash = current_hash
+        if (len(text.strip()) <= 20 or self.db.get_setting("capture_paused", "false") == "true" or
+                current_hash == self.db.get_setting("last_primer_clipboard_hash")):
+            return None
+
         active_project = self.db.get_setting("active_project", "General") or "General"
         project_id = self.db.get_or_create_project(name=active_project)
 
-        entry_id = self.db.insert_entry(
+        entry_id = self.db.insert_capture(
             raw_text=text,
             source_app=SOURCE_CLIPBOARD,
             project_id=project_id,
-            source_metadata={"length": len(text)},
-            quadrant=None,
-            status="active"
+            source_metadata={"length": len(text)}
         )
-        logger.info("Captured new clipboard entry #%d (%d chars) in '%s'.", entry_id, len(text), active_project)
+        logger.debug("Captured new clipboard entry #%d (%d chars) in '%s'.", entry_id, len(text), active_project)
         return entry_id
 
     def _read_clipboard(self) -> Optional[str]:

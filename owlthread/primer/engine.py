@@ -1,9 +1,10 @@
 """Primer Engine coordinating intent classification, memory search, primer generation, and done signal handling."""
 
-import ctypes
+from __future__ import annotations
+
+import hashlib
+import json
 import logging
-import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -17,71 +18,7 @@ from owlthread.primer.search import MemorySearcher
 logger = logging.getLogger(__name__)
 
 
-def copy_to_clipboard(text: str) -> bool:
-    """
-    Copy plain text to system clipboard across platforms with robust fallbacks.
-    """
-    if not text:
-        return False
-
-    # Method 1: Windows ctypes native clipboard API
-    if sys.platform == "win32":
-        try:
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-
-            GMEM_MOVEABLE = 0x0002
-            CF_UNICODETEXT = 13
-
-            if not user32.OpenClipboard(0):
-                time.sleep(0.05)
-                if not user32.OpenClipboard(0):
-                    raise RuntimeError("Could not open clipboard")
-
-            try:
-                user32.EmptyClipboard()
-                text_bytes = text.encode("utf-16le") + b"\x00\x00"
-                h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(text_bytes))
-                if h_mem:
-                    p_mem = kernel32.GlobalLock(h_mem)
-                    if p_mem:
-                        ctypes.memmove(p_mem, text_bytes, len(text_bytes))
-                        kernel32.GlobalUnlock(h_mem)
-                        user32.SetClipboardData(CF_UNICODETEXT, h_mem)
-                        return True
-            finally:
-                user32.CloseClipboard()
-        except Exception as e:
-            logger.debug("ctypes clipboard copy failed: %s, falling back to clip.exe", e)
-
-        # Method 2: Windows clip command fallback
-        try:
-            proc = subprocess.Popen(
-                ["clip"],
-                stdin=subprocess.PIPE,
-                close_fds=True,
-                shell=False
-            )
-            proc.communicate(input=text.encode("utf-16le"))
-            if proc.returncode == 0:
-                return True
-        except Exception as e:
-            logger.debug("clip.exe copy failed: %s", e)
-
-    # Method 3: Try tkinter clipboard
-    try:
-        import tkinter as tk
-        r = tk.Tk()
-        r.withdraw()
-        r.clipboard_clear()
-        r.clipboard_append(text)
-        r.update()
-        r.destroy()
-        return True
-    except Exception as e:
-        logger.debug("tkinter clipboard copy failed: %s", e)
-
-    return False
+from owlthread.clipboard_io import copy_to_clipboard
 
 
 @dataclass
@@ -95,6 +32,7 @@ class PrimerResult:
     elapsed_sec: float = 0.0
     is_flush_signal: bool = False
     flush_summary: Optional[Dict[str, Any]] = None
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to serializable dictionary."""
@@ -108,6 +46,7 @@ class PrimerResult:
             "elapsed_sec": round(self.elapsed_sec, 3),
             "is_flush_signal": self.is_flush_signal,
             "flush_summary": self.flush_summary,
+            "diagnostics": self.diagnostics,
         }
 
 
@@ -123,7 +62,7 @@ class PrimerEngine:
         db: Optional[Database] = None,
         llm_client: Optional[LLMClient] = None,
         extraction_pipeline: Optional[Any] = None,
-    ):
+    ) -> None:
         self.db = db or Database()
         self.llm_client = llm_client or LLMClient()
         self.classifier = IntentClassifier(self.llm_client)
@@ -136,6 +75,14 @@ class PrimerEngine:
             from owlthread.extraction.pipeline import ExtractionPipeline
             self.pipeline = ExtractionPipeline(db=self.db, llm_client=self.llm_client)
 
+    def _copy(self, text: str) -> bool:
+        """Register the output before copying so the watcher cannot recapture it."""
+        try:
+            self.db.set_setting("last_primer_clipboard_hash", hashlib.sha256(text.encode("utf-8")).hexdigest())
+        except Exception:
+            logger.warning("Could not persist clipboard suppression hash")
+        return copy_to_clipboard(text)
+
     def generate_primer(
         self,
         user_request: str,
@@ -144,6 +91,7 @@ class PrimerEngine:
         auto_copy: bool = True,
         include_history: bool = False,
         project_id: Optional[int] = None,
+        context_char_budget: int = 12000,
     ) -> PrimerResult:
         """
         Execute full pipeline:
@@ -154,6 +102,14 @@ class PrimerEngine:
         5. Copy compiled primer to system clipboard.
         """
         start_time = time.time()
+        if project_id is None:
+            project_id = self.db.get_or_create_project(self.db.get_setting("active_project", "General"))
+        elif type(project_id) is not int or not self.db.get_project_by_id(project_id):
+            raise ValueError("Project does not exist")
+        self.llm_client.reload_from_db(self.db)
+        self.generator.custom_system_prompt = self.db.get_setting("primer_prompt") or None
+        if intent_override and intent_override not in {"dev_task", "external_comms", "status_query", "other"}:
+            raise ValueError("Invalid intent")
         cleaned_query = (user_request or "").strip()
         if not cleaned_query:
             return PrimerResult(
@@ -181,10 +137,12 @@ class PrimerEngine:
                     msg += f"- **[#{item['entry_id']}] ({item['quadrant']})**: {item['summary']}\n"
                     if item.get("superseded_id"):
                         msg += f"  *(Superseded previous record #{item['superseded_id']})*\n"
-            else:
+            elif not flush_res.get("errors"):
                 msg += "Capture buffers were empty or captured text contained no qualifying durable knowledge."
+            if flush_res.get("errors"):
+                msg += f"\n\n{len(flush_res['errors'])} captures could not be processed. They remain saved for retry; run done again after resolving the storage error."
 
-            copied = copy_to_clipboard(msg) if auto_copy else False
+            copied = self._copy(msg) if auto_copy else False
             return PrimerResult(
                 query=cleaned_query,
                 intent="status_query",
@@ -202,29 +160,68 @@ class PrimerEngine:
         else:
             intent = self.classifier.classify(cleaned_query)
 
-        logger.info("Classified query '%s' -> intent: %s", cleaned_query, intent)
+        logger.debug("Classified request as %s", intent)
 
-        # 2. Relevance Search (Keyword + Recency with active status filtering)
-        matched_entries = self.searcher.search(
-            query=cleaned_query,
-            limit=search_limit,
-            include_history=include_history,
-            project_id=project_id,
-        )
+        # 2. Local retrieval. Normal tasks fan out across every quadrant and the
+        # durable raw capture index, then pack evidence to a strict character cap.
+        context: Dict[str, Any] | None = None
+        if intent == "status_query":
+            from owlthread.config import QUADRANT_COLORS
+            # Include every quadrant even when recent architecture dominates the feed.
+            matched_entries = []
+            for quadrant in QUADRANT_COLORS:
+                matched_entries.extend(self.searcher.search("",limit=max(1,search_limit//4),
+                    project_id=project_id,quadrant=quadrant,include_history=include_history))
+        else:
+            context = self.searcher.search_context(cleaned_query,project_id=project_id,
+                per_quadrant_limit=max(1,min(200,search_limit)),capture_limit=max(1,min(200,search_limit)),
+                char_budget=context_char_budget,include_history=include_history)
+            matched_entries = context["items"]
 
         logger.info("Found %d matching memory entries for primer context", len(matched_entries))
 
-        # 3. Primer Generation
-        primer_text = self.generator.generate(
-            user_request=cleaned_query,
-            intent_tag=intent,
-            matched_entries=matched_entries
-        )
+        # 3. Persistent exact-result cache. The key changes with the query,
+        # project, configured model/prompt, or any matched evidence revision.
+        revisions=[]
+        for entry in matched_entries:
+            if entry.get("context_kind")=="capture":
+                revisions.append(["C",entry["id"],entry.get("captured_at"),entry.get("processed_chars"),
+                                  entry.get("extraction_status")])
+            else:
+                revisions.append(["M",entry["id"],entry.get("updated_at") or entry.get("created_at"),entry.get("status")])
+        model_key=f"{self.llm_client.provider or 'fallback'}:{self.llm_client.model or ''}"
+        matched_revision=hashlib.sha256(json.dumps(revisions,sort_keys=True,default=str).encode()).hexdigest()
+        cache_material={"query":cleaned_query.casefold(),"project_id":project_id,"model":model_key,
+                        "matched_revision":matched_revision,"intent":intent,"history":include_history,
+                        "prompt":hashlib.sha256(self.generator.active_system_prompt.encode()).hexdigest(),
+                        "context":hashlib.sha256((context or {}).get("context_text","").encode()).hexdigest()}
+        cache_key=hashlib.sha256(json.dumps(cache_material,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+        cached=self.db.get_primer_cache(cache_key)
+        cache_hit=bool(cached and isinstance(cached.get("primer_text"),str))
+        if cache_hit:
+            primer_text=cached["primer_text"]
+        else:
+            primer_text = self.generator.generate(
+                user_request=cleaned_query,
+                intent_tag=intent,
+                matched_entries=matched_entries,
+                context_text=context["context_text"] if context is not None else None
+            )
+            self.db.set_primer_cache(cache_key,project_id,cleaned_query,model_key,matched_revision,
+                                     {"primer_text":primer_text})
+        if intent == "status_query":
+            where = "status='active'" + (" AND project_id=?" if project_id is not None else "")
+            totals = {row["quadrant"]:row["n"] for row in self.db.execute_read(
+                "SELECT quadrant,COUNT(*) AS n FROM memory_entries WHERE "+where+" GROUP BY quadrant",
+                (project_id,) if project_id is not None else ())}
+            from owlthread.config import QUADRANT_COLORS
+            primer_text += "\n\n## Active Memory Totals\n" + "\n".join(
+                f"- {quadrant.replace('_',' ').title()}: {totals.get(quadrant,0)}" for quadrant in QUADRANT_COLORS)
 
         # 4. Auto-copy to clipboard
         copied = False
         if auto_copy and primer_text:
-            copied = copy_to_clipboard(primer_text)
+            copied = self._copy(primer_text)
 
         elapsed = time.time() - start_time
 
@@ -234,5 +231,12 @@ class PrimerEngine:
             primer_text=primer_text,
             matched_entries=matched_entries,
             copied_to_clipboard=copied,
-            elapsed_sec=elapsed
+            elapsed_sec=elapsed,
+            diagnostics={"context_char_budget":context["char_budget"] if context else 0,
+                         "context_chars_used":context["chars_used"] if context else 0,
+                         "context_truncated":context["truncated"] if context else False,
+                         "context_candidates":context["candidates_considered"] if context else len(matched_entries),
+                         "memory_matches":context["memory_count"] if context else len(matched_entries),
+                         "capture_matches":context["capture_count"] if context else 0,
+                         "cache_hit":cache_hit,"cache_key":cache_key[:16],"cache_capacity":200}
         )

@@ -1,2000 +1,565 @@
-"""OwlThread Desktop Application (GUI).
-Built with CustomTkinter for a modern, native Windows dark-mode experience.
-Features:
-- Real-time live feed with stats banner
-- Source filter chips & search-as-you-type
-- Quick Dump Box for instant note intake
-- 4-Quadrant Knowledge Vault
-- Task Query & Primer Engine
-- 2-Way Site Access Manager (coordinates with browser extension)
-- Wipe / Clear Database button
-- Master Pause/Resume capture control
-"""
+"""OwlThread's standard-library Tk desktop: feed, search, quadrants and primers."""
+from __future__ import annotations
 
-import json
 import logging
+import queue
 import threading
-import time
-import webbrowser
-from typing import Any, Dict, List, Optional
-import customtkinter as ctk
-from tkinter import messagebox
+import tkinter as tk
+from tkinter import ttk
+from typing import Any, Callable
 
-from owlthread.capture.engine import CaptureEngine
-from owlthread.config import DEFAULT_HTTP_PORT
+from owlthread.config import DEFAULT_HTTP_PORT, QUADRANT_COLORS
 from owlthread.db.database import Database
-from owlthread.extraction.pipeline import ExtractionPipeline
-from owlthread.gui.animations import AnimationEngine
-from owlthread.gui.feed_card import MemoryFeedCard
-from owlthread.primer.engine import PrimerEngine, copy_to_clipboard
+from owlthread.capture.engine import CaptureEngine
+from owlthread.gui.animations import Animator
+from owlthread.gui.feed_card import FeedCard
+from owlthread.hotkey import WindowsHotkeyListener
+from owlthread.primer.engine import PrimerEngine
+from owlthread.primer.llm import LLMClient, DEFAULTS
+from owlthread.primer.search import MemorySearcher
+from owlthread.primer.ui import PrimerPanel, PrimerPopupUI
 
 logger = logging.getLogger(__name__)
-
-# ── Premium Dark Palette — Refined Depth Hierarchy ──────────────────
-# Background depth levels (5 layers of visual depth)
-COLOR_BG_MAIN       = "#06080d"          # Deepest void — root window
-COLOR_BG_SIDEBAR    = "#050810"          # Sidebar — slightly darker than main
-COLOR_BG_CARD       = "#0f1420"          # Card / surface — raised one level
-COLOR_BG_CARD_ALT   = "#151c2c"          # Elevated container / inputs
-COLOR_BG_INSPECTOR  = "#0a0f18"          # Detail reader background
-COLOR_BG_INPUT      = "#080c14"          # Input fields — subtle inset
-
-# Border depth awareness
-COLOR_BORDER        = "#182030"          # Hairline border — default
-COLOR_BORDER_FOCUS  = "#6366f1"          # Focus ring — electric indigo
-COLOR_BORDER_HOVER  = "#2a3550"          # Hover reveal border
-
-# Brand colors (richer saturation)
-COLOR_PRIMARY       = "#6366f1"          # Electric indigo — primary actions
-COLOR_PRIMARY_HOVER = "#4f46e5"          # Indigo hover state
-COLOR_PRIMARY_DIM   = "#4338ca"          # Indigo dimmed / pressed
-COLOR_ACCENT        = "#22d3ee"          # Cyan accent — highlights
-COLOR_SUCCESS       = "#22c55e"          # Emerald green — success
-COLOR_WARNING       = "#eab308"          # Amber — warnings
-COLOR_DANGER        = "#ef4444"          # Crimson red — destructive
-
-# Text contrast hierarchy
-COLOR_TEXT          = "#f1f5f9"          # High emphasis — headings
-COLOR_TEXT_MUTED    = "#8b9ab8"          # Medium emphasis — body
-COLOR_TEXT_SUBTLE   = "#506080"          # Low emphasis — timestamps, metadata
-
-# ── Typography System ───────────────────────────────────────────────
-FONT_HEADING     = ("Segoe UI", 16, "bold")
-FONT_SUBHEADING  = ("Segoe UI", 14, "bold")
-FONT_TITLE       = ("Segoe UI", 13, "bold")
-FONT_BODY_BOLD   = ("Segoe UI", 12, "bold")
-FONT_BODY        = ("Segoe UI", 12)
-FONT_CAPTION     = ("Segoe UI", 11)
-FONT_CAPTION_B   = ("Segoe UI", 11, "bold")
-FONT_SMALL       = ("Segoe UI", 10)
-FONT_SMALL_B     = ("Segoe UI", 10, "bold")
-FONT_TINY        = ("Segoe UI", 9)
-FONT_NAV         = ("Segoe UI", 12, "bold")
-FONT_BRAND       = ("Segoe UI", 18, "bold")
-FONT_STAT        = ("Segoe UI", 20, "bold")
+BG,CARD,TEXT,MUTED,ACCENT = "#1a1a2e","#222239","#e2e8f0","#a4abc2","#a7a1ff"
 
 
-class OwlThreadDesktopApp(ctk.CTk):
-    """Main Windows Desktop Application for OwlThread."""
+def label(master: tk.Misc, text: str, size: int = 11, color: str = TEXT, bold: bool = False) -> tk.Label:
+    return tk.Label(master,text=text,bg=master.cget("bg"),fg=color,font=("Segoe UI",size,"bold" if bold else "normal"),
+                    justify="left",anchor="w")
 
-    def __init__(
-        self,
-        db: Optional[Database] = None,
-        port: int = DEFAULT_HTTP_PORT,
-        auto_start_engine: bool = True,
-    ):
+
+def button(master: tk.Misc, text: str, command: Callable[[],None], primary: bool = False) -> tk.Button:
+    return tk.Button(master,text=text,command=command,bg=ACCENT if primary else "#30304b",fg="#161628" if primary else TEXT,
+                     activebackground="#b7b1ff" if primary else "#41415f",activeforeground="#161628" if primary else TEXT,
+                     relief="flat",bd=0,padx=15,pady=9,font=("Segoe UI",10,"bold"),cursor="hand2")
+
+
+class ScrollFrame(tk.Frame):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master,bg=BG)
+        self.canvas = tk.Canvas(self,bg=BG,highlightthickness=0,bd=0)
+        scrollbar = ttk.Scrollbar(self,orient="vertical",command=self.canvas.yview)
+        scrollbar.pack(side="right",fill="y")
+        self.canvas.pack(side="left",fill="both",expand=True)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.content = tk.Frame(self.canvas,bg=BG)
+        window = self.canvas.create_window((0,0),window=self.content,anchor="nw")
+        self.content.bind("<Configure>",lambda _:self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>",lambda event:self.canvas.itemconfigure(window,width=event.width))
+
+    def wheel(self, event: tk.Event) -> None:
+        self.canvas.yview_scroll(-int(event.delta/120) if event.delta else (-1 if event.num==4 else 1),"units")
+
+
+class OwlThreadApp(tk.Tk):
+    def __init__(self, db: Database | None = None, port: int = DEFAULT_HTTP_PORT,
+                 auto_start_engine: bool = True) -> None:
         super().__init__()
-
+        self._owns_db = db is None
         self.db = db or Database()
         self.port = port
-        self.auto_start_engine = auto_start_engine
-
-        # Configure CustomTkinter window
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-        self.title("OwlThread — Ambient Memory Command Center")
-        self.geometry("1180x780")
-        self.minsize(980, 660)
-        self.configure(fg_color=COLOR_BG_MAIN)
-
-        # Coordinate Engines
-        self.pipeline = ExtractionPipeline(db=self.db)
-        self.primer_engine = PrimerEngine(db=self.db, extraction_pipeline=self.pipeline)
-        self.engine: Optional[CaptureEngine] = None
-
-        # Reload persisted AI configuration
-        self.pipeline.extractor.llm_client.reload_from_db(self.db)
-        self.primer_engine.generator.llm_client.reload_from_db(self.db)
-
-        # Filter & View State
-        self.current_view = "live_feed"
-        self.filter_project = "All Projects"
-        self.filter_source = "all"
-        self.search_query = ""
-        self.selected_quadrant = "all"
-        self.is_capture_paused = False
-        self._search_debounce_timer = None
-        self.selected_entry: Optional[Dict[str, Any]] = None
-        self.feed_cards: List[MemoryFeedCard] = []
-        self.vault_cards: List[MemoryFeedCard] = []
-        self._key_visible = False
-
-        # ── Performance: Diff-based refresh tracking ────────────────
-        self._last_feed_ids: List[int] = []
-        self._last_vault_ids: List[int] = []
-        self._last_mem_count: int = -1
-        self._last_domain_count: int = -1
-
-        # ── Lazy view building — only build when first visited ──────
-        self._built_views: set = set()
-
-        # Build UI Layout (sidebar + content shell)
-        self._build_layout()
-
-        # ── Keyboard shortcuts for power users ──────────────────────
-        self._bind_keyboard_shortcuts()
-
-        # Initial Refresh
-        self.refresh_feed()
-
-        # ── Deferred engine start — UI renders first, engine starts after ──
-        if self.auto_start_engine:
-            self.after(100, self._init_capture_engine)
-
-        self._schedule_periodic_poll()
-
-    def _init_capture_engine(self) -> None:
-        """Start local HTTP server & background connectors if not already running."""
-        try:
-            self.engine = CaptureEngine(
-                db=self.db,
-                http_port=self.port,
-                enable_clipboard=True,
-                enable_connectors=True,
-                enable_http=True,
-                pipeline=self.pipeline,
-            )
-            self.engine.start()
-            self.engine.add_capture_callback(self._on_live_capture_received)
-            if self.engine.http_listener_error:
-                self.beacon_lbl.configure(
-                    text=f"🔴 Port {self.port} In Use",
-                    text_color=COLOR_DANGER
-                )
-            else:
-                logger.info("OwlThread Capture Engine launched on port %d", self.port)
-        except Exception as e:
-            logger.warning("Could not bind CaptureEngine: %s", e)
-            if hasattr(self, "beacon_lbl"):
-                self.beacon_lbl.configure(
-                    text=f"🔴 Port {self.port} Error",
-                    text_color=COLOR_DANGER
-                )
-
-    def _on_live_capture_received(self, entry_data: Dict[str, Any]) -> None:
-        """Callback invoked when a new capture arrives from browser extension."""
-        self.after(0, lambda: self._handle_incoming_capture(entry_data))
-
-    def _handle_incoming_capture(self, entry_data: Dict[str, Any]) -> None:
-        """Update live feed and status indicator on UI thread."""
-        src = entry_data.get("source_app") or "browser"
-        self._flash_status_beacon(f"Captured from {src}!", COLOR_ACCENT)
-        if self.current_view == "live_feed":
-            self.refresh_feed()
-        self._update_status_counts()
-
-    # -------------------------------------------------------------
-    # UI Layout & Sidebar Navigation
-    # -------------------------------------------------------------
-    def _build_layout(self) -> None:
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-
-        # 1. Left Sidebar
-        self.sidebar = ctk.CTkFrame(
-            self,
-            width=250,
-            corner_radius=0,
-            fg_color=COLOR_BG_SIDEBAR,
-            border_width=1,
-            border_color=COLOR_BORDER,
-        )
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_propagate(False)
-        self._build_sidebar_content()
-
-        # 2. Right Content Area
-        self.content_container = ctk.CTkFrame(self, fg_color="transparent")
-        self.content_container.grid(row=0, column=1, sticky="nsew", padx=16, pady=16)
-        self.content_container.grid_columnconfigure(0, weight=1)
-        self.content_container.grid_rowconfigure(0, weight=1)
-
-        # Create Views
-        self.views: Dict[str, ctk.CTkFrame] = {}
-        self._build_live_feed_view()
-        self._build_quick_dump_view()
-        self._build_vault_view()
-        self._build_sites_view()
-        self._build_primer_view()
-        self._build_settings_view()
-
-        # Display default view
-        self.show_view("live_feed")
-
-    def _build_sidebar_content(self) -> None:
-        # Header / Brand
-        header_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        header_frame.pack(fill="x", padx=16, pady=(20, 16))
-
-        ctk.CTkLabel(
-            header_frame,
-            text="🦉 OwlThread",
-            font=FONT_BRAND,
-            text_color=COLOR_TEXT,
-            anchor="w",
-        ).pack(fill="x")
-
-        ctk.CTkLabel(
-            header_frame,
-            text="Ambient Memory Command Center",
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_SUBTLE,
-            anchor="w",
-        ).pack(fill="x")
-
-        # ── Nav Buttons with Active Indicator ───────────────────────
-        nav_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        nav_frame.pack(fill="x", padx=8, pady=10)
-
-        self.nav_buttons: Dict[str, ctk.CTkButton] = {}
-        self.nav_indicators: Dict[str, ctk.CTkFrame] = {}
-
-        nav_items = [
-            ("live_feed",   "📡 Live Stream Feed",      "Ctrl+1"),
-            ("quick_dump",  "📥 Quick Dump Box",        "Ctrl+2"),
-            ("vault",       "🗂️ Knowledge Vault",       "Ctrl+3"),
-            ("sites",       "🌐 Site Access Manager",   "Ctrl+4"),
-            ("primer",      "⚡ Primer & Query",         "Ctrl+5"),
-            ("settings",    "⚙️ Prompts & Settings",    "Ctrl+6"),
-        ]
-
-        for view_key, label, shortcut in nav_items:
-            # Container for indicator + button
-            row = ctk.CTkFrame(nav_frame, fg_color="transparent", height=38)
-            row.pack(fill="x", pady=1)
-            row.pack_propagate(False)
-
-            # Active indicator bar (3px left strip)
-            indicator = ctk.CTkFrame(row, width=3, corner_radius=2, fg_color="transparent")
-            indicator.pack(side="left", fill="y", padx=(4, 0), pady=6)
-            self.nav_indicators[view_key] = indicator
-
-            btn = ctk.CTkButton(
-                row,
-                text=label,
-                font=FONT_NAV,
-                anchor="w",
-                fg_color="transparent",
-                text_color=COLOR_TEXT_MUTED,
-                hover_color=COLOR_BG_CARD,
-                height=34,
-                corner_radius=8,
-                command=lambda k=view_key: self.show_view(k),
-            )
-            btn.pack(side="left", fill="both", expand=True, padx=(4, 4))
-            self.nav_buttons[view_key] = btn
-
-        # ── Divider ────────────────────────────────────────────────
-        ctk.CTkFrame(self.sidebar, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=16, pady=(6, 6))
-
-        # ── Bottom Status Section ──────────────────────────────────
-        status_frame = ctk.CTkFrame(
-            self.sidebar,
-            fg_color=COLOR_BG_CARD,
-            border_width=1,
-            border_color=COLOR_BORDER,
-            corner_radius=10,
-        )
-        status_frame.pack(side="bottom", fill="x", padx=12, pady=16)
-
-        # Server beacon status
-        self.beacon_lbl = ctk.CTkLabel(
-            status_frame,
-            text=f"🟢 Server: 127.0.0.1:{self.port}",
-            font=FONT_SMALL_B,
-            text_color=COLOR_SUCCESS,
-            anchor="w",
-        )
-        self.beacon_lbl.pack(fill="x", padx=10, pady=(8, 2))
-
-        # Memory counts
-        self.mem_count_lbl = ctk.CTkLabel(
-            status_frame,
-            text="Memories: 0 active",
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-        )
-        self.mem_count_lbl.pack(fill="x", padx=10, pady=(0, 4))
-
-        # AI Brain status
-        self.sidebar_brain_lbl = ctk.CTkLabel(
-            status_frame,
-            text="🧠 Brain: Offline",
-            font=FONT_SMALL_B,
-            text_color=COLOR_ACCENT,
-            anchor="w",
-            cursor="hand2",
-        )
-        self.sidebar_brain_lbl.pack(fill="x", padx=10, pady=(0, 6))
-        self.sidebar_brain_lbl.bind("<Button-1>", lambda e: self.show_view("settings"))
-
-        # Master Pause / Resume Toggle
-        self.pause_btn = ctk.CTkButton(
-            status_frame,
-            text="⏸️ Pause Capture",
-            font=FONT_SMALL,
-            height=26,
-            fg_color="#1e2940",
-            hover_color="#2a3a55",
-            corner_radius=6,
-            command=self._toggle_master_pause,
-        )
-        self.pause_btn.pack(fill="x", padx=8, pady=(0, 6))
-
-        # Flush Buffers Button
-        self.flush_btn = ctk.CTkButton(
-            status_frame,
-            text="🏁 Task Done / Flush",
-            font=FONT_SMALL_B,
-            height=28,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=6,
-            command=self._handle_flush_done,
-        )
-        self.flush_btn.pack(fill="x", padx=8, pady=(0, 6))
-
-        # Instant Batch Mode Toggle Switch
-        is_instant_init = self.db.get_setting("instant_batch_mode", "false").lower() == "true"
-        self.instant_batch_var = ctk.BooleanVar(value=is_instant_init)
-        self.instant_batch_switch = ctk.CTkSwitch(
-            status_frame,
-            text="⚡ Instant Batch",
-            font=FONT_SMALL,
-            variable=self.instant_batch_var,
-            onvalue=True,
-            offvalue=False,
-            progress_color=COLOR_SUCCESS,
-            command=self._toggle_instant_batch_mode,
-        )
-        self.instant_batch_switch.pack(fill="x", padx=12, pady=(0, 8))
-
-    def _toggle_instant_batch_mode(self) -> None:
-        """Toggle between Instant Batch Mode (immediate extraction) and Buffer Mode (5k words)."""
-        is_active = self.instant_batch_var.get()
-        self.db.set_setting("instant_batch_mode", "true" if is_active else "false")
-        if is_active:
-            self._flash_status_beacon("Instant Batch: ACTIVE ⚡", COLOR_SUCCESS)
-            # Immediately flush any items currently waiting in the rolling buffer
-            self._handle_flush_done()
-        else:
-            self._flash_status_beacon("Buffer Mode: 5,000 Words", COLOR_TEXT_MUTED)
-
-    def _toggle_master_pause(self) -> None:
-        """Toggle global pause state and inform local server."""
-        self.is_capture_paused = not self.is_capture_paused
-        if self.engine and self.engine.http_listener and self.engine.http_listener._server:
-            self.engine.http_listener._server.is_paused = self.is_capture_paused
-
-        if self.is_capture_paused:
-            self.pause_btn.configure(text="▶️ Resume Capture", fg_color=COLOR_WARNING)
-            self.beacon_lbl.configure(text="⏸️ Capture Paused", text_color=COLOR_WARNING)
-        else:
-            self.pause_btn.configure(text="⏸️ Pause Capture", fg_color="#1e2940")
-            self.beacon_lbl.configure(text=f"🟢 Server: 127.0.0.1:{self.port}", text_color=COLOR_SUCCESS)
-
-    def _ensure_view_built(self, view_key: str) -> None:
-        """Lazy-build a view on first access."""
-        if view_key in self._built_views:
-            return
-        builders = {
-            "quick_dump": self._build_quick_dump_view,
-            "vault": self._build_vault_view,
-            "sites": self._build_sites_view,
-            "primer": self._build_primer_view,
-            "settings": self._build_settings_view,
-        }
-        builder = builders.get(view_key)
-        if builder:
-            builder()
-            self._built_views.add(view_key)
-
-    def show_view(self, view_key: str) -> None:
-        """Switch active view with animated nav indicators and lazy building."""
-        self.current_view = view_key
-
-        # Lazy-build view if not yet constructed
-        self._ensure_view_built(view_key)
-
-        # Update nav buttons with smooth indicator transitions
-        for key, btn in self.nav_buttons.items():
-            indicator = self.nav_indicators.get(key)
-            if key == view_key:
-                btn.configure(fg_color=COLOR_PRIMARY, text_color=COLOR_TEXT)
-                if indicator:
-                    AnimationEngine.color_transition(
-                        indicator, "fg_color", COLOR_BG_SIDEBAR, COLOR_PRIMARY,
-                        duration_ms=180, steps=8
-                    )
-            else:
-                btn.configure(fg_color="transparent", text_color=COLOR_TEXT_MUTED)
-                if indicator:
-                    try:
-                        indicator.configure(fg_color="transparent")
-                    except Exception:
-                        pass
-
-        # Switch visible frame
-        for key, frame in self.views.items():
-            if key == view_key:
-                frame.grid(row=0, column=0, sticky="nsew")
-            else:
-                frame.grid_forget()
-
-        # Post-switch data loads
-        if view_key in ("live_feed", "vault"):
-            self.refresh_feed()
-        elif view_key == "sites":
-            self.refresh_sites_view()
-        elif view_key == "settings":
-            self._load_settings_into_inputs()
-
-    # -------------------------------------------------------------
-    # View 1: 📡 Split-Pane Live Stream Feed
-    # -------------------------------------------------------------
-    def _build_live_feed_view(self) -> None:
-        frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.views["live_feed"] = frame
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(2, weight=1)
-
-        # 1. Top Stats Banner with animated counters
-        stats_banner = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        stats_banner.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-
-        stat_col1 = ctk.CTkFrame(stats_banner, fg_color="transparent")
-        stat_col1.pack(side="left", fill="both", expand=True, padx=16, pady=10)
-        self.stat_mem_val = ctk.CTkLabel(stat_col1, text="0", font=FONT_STAT, text_color=COLOR_ACCENT)
-        self.stat_mem_val.pack(anchor="w")
-        ctk.CTkLabel(stat_col1, text="Active Memories", font=FONT_SMALL, text_color=COLOR_TEXT_MUTED).pack(anchor="w")
-
-        # Separator
-        ctk.CTkFrame(stats_banner, width=1, fg_color=COLOR_BORDER).pack(side="left", fill="y", pady=10)
-
-        stat_col2 = ctk.CTkFrame(stats_banner, fg_color="transparent")
-        stat_col2.pack(side="left", fill="both", expand=True, padx=16, pady=10)
-        self.stat_domains_val = ctk.CTkLabel(stat_col2, text="0", font=FONT_STAT, text_color=COLOR_SUCCESS)
-        self.stat_domains_val.pack(anchor="w")
-        ctk.CTkLabel(stat_col2, text="Connected Domains", font=FONT_SMALL, text_color=COLOR_TEXT_MUTED).pack(anchor="w")
-
-        # Separator
-        ctk.CTkFrame(stats_banner, width=1, fg_color=COLOR_BORDER).pack(side="left", fill="y", pady=10)
-
-        stat_col3 = ctk.CTkFrame(stats_banner, fg_color="transparent")
-        stat_col3.pack(side="left", fill="both", expand=True, padx=16, pady=10)
-        self.stat_status_val = ctk.CTkLabel(stat_col3, text="● Online", font=FONT_STAT, text_color=COLOR_SUCCESS)
-        self.stat_status_val.pack(anchor="w")
-        ctk.CTkLabel(stat_col3, text="Capture Daemon", font=FONT_SMALL, text_color=COLOR_TEXT_MUTED).pack(anchor="w")
-
-        # 2. Control Bar (Instant Search + Filter Chips)
-        ctrl_bar = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        ctrl_bar.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-
-        ctrl_top = ctk.CTkFrame(ctrl_bar, fg_color="transparent")
-        ctrl_top.pack(fill="x", padx=10, pady=(8, 6))
-
-        self.feed_search_entry = ctk.CTkEntry(
-            ctrl_top,
-            placeholder_text="🔍 Search memories...",
-            font=FONT_CAPTION,
-            width=280,
-            fg_color=COLOR_BG_INPUT,
-            border_color=COLOR_BORDER,
-            corner_radius=8,
-        )
-        self.feed_search_entry.pack(side="left", padx=(0, 8))
-        self.feed_search_entry.bind("<KeyRelease>", self._on_search_key_release)
-
-        self.project_menu = ctk.CTkOptionMenu(
-            ctrl_top,
-            values=["All Projects", "General"],
-            font=FONT_CAPTION,
-            fg_color="#1a2235",
-            button_color=COLOR_PRIMARY,
-            corner_radius=8,
-            command=self._on_project_filter_changed,
-        )
-        self.project_menu.pack(side="left", padx=(0, 6))
-
-        self.btn_new_project = ctk.CTkButton(
-            ctrl_top,
-            text="➕ Project",
-            font=FONT_CAPTION_B,
-            width=76,
-            height=28,
-            fg_color="#1a2235",
-            hover_color="#2a3550",
-            corner_radius=6,
-            command=self._handle_create_project_dialog,
-        )
-        self.btn_new_project.pack(side="left", padx=(0, 8))
-
-        refresh_btn = ctk.CTkButton(
-            ctrl_top,
-            text="🔄 Refresh",
-            font=FONT_CAPTION,
-            width=75,
-            height=28,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=6,
-            command=self.refresh_feed,
-        )
-        refresh_btn.pack(side="right")
-
-        # Source Filter Chips Row
-        chips_row = ctk.CTkFrame(ctrl_bar, fg_color="transparent")
-        chips_row.pack(fill="x", padx=10, pady=(0, 8))
-
-        self.source_chip_buttons: Dict[str, ctk.CTkButton] = {}
-        chips = [
-            ("all", "All Sources"),
-            ("browser", "🌐 Browser"),
-            ("user_message", "💬 User Chat"),
-            ("assistant_response", "🤖 AI Output"),
-            ("user_selection", "✨ Highlight"),
-            ("direct", "📝 Notes"),
-            ("clipboard", "📋 Clipboard"),
-        ]
-
-        for s_key, label in chips:
-            btn = ctk.CTkButton(
-                chips_row,
-                text=label,
-                font=FONT_SMALL,
-                height=24,
-                fg_color="transparent",
-                text_color=COLOR_TEXT_MUTED,
-                hover_color="#1a2235",
-                corner_radius=12,
-                command=lambda k=s_key: self._select_source_filter(k),
-            )
-            btn.pack(side="left", padx=(0, 4))
-            self.source_chip_buttons[s_key] = btn
-
-        self.source_chip_buttons["all"].configure(fg_color=COLOR_PRIMARY, text_color="#ffffff")
-
-        # 3. Split-Pane Container (Master List on Left, Detail Reader on Right)
-        split_pane = ctk.CTkFrame(frame, fg_color="transparent")
-        split_pane.grid(row=2, column=0, sticky="nsew")
-        split_pane.grid_columnconfigure(0, weight=0, minsize=400)
-        split_pane.grid_columnconfigure(1, weight=1)
-        split_pane.grid_rowconfigure(0, weight=1)
-
-        # Left Column: Feed Cards
-        self.feed_scroll = ctk.CTkScrollableFrame(split_pane, width=410, fg_color="transparent")
-        self.feed_scroll.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self.feed_scroll.grid_columnconfigure(0, weight=1)
-
-        # Right Column: Detail Inspector Card
-        self.detail_frame = ctk.CTkFrame(split_pane, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        self.detail_frame.grid(row=0, column=1, sticky="nsew")
-        self._build_detail_inspector(self.detail_frame, "feed")
-
-    def _build_detail_inspector(self, container: ctk.CTkFrame, prefix: str = "feed") -> None:
-        """Construct the Right Detail Reader Pane.
-
-        Uses prefix-based attr naming (e.g., feed_detail_textbox, vault_detail_textbox)
-        to prevent the bug where vault inspector overwrites feed inspector references.
-        """
-        container.grid_columnconfigure(0, weight=1)
-        container.grid_rowconfigure(2, weight=1)
-
-        # Top Meta Bar
-        top_bar = ctk.CTkFrame(container, fg_color="transparent")
-        top_bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 6))
-        setattr(self, f"{prefix}_detail_top_bar", top_bar)
-
-        quad_pill = ctk.CTkLabel(
-            top_bar,
-            text="📌 Context",
-            font=FONT_CAPTION_B,
-            text_color="#a5b4fc",
-            fg_color="#1a1740",
-            corner_radius=6,
-            padx=8,
-            pady=2,
-        )
-        quad_pill.pack(side="left", padx=(0, 8))
-        setattr(self, f"{prefix}_detail_quad_pill", quad_pill)
-
-        src_badge = ctk.CTkLabel(
-            top_bar,
-            text="🌐 browser",
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_MUTED,
-            fg_color=COLOR_BG_MAIN,
-            corner_radius=5,
-            padx=8,
-            pady=2,
-        )
-        src_badge.pack(side="left", padx=(0, 8))
-        setattr(self, f"{prefix}_detail_src_badge", src_badge)
-
-        time_lbl = ctk.CTkLabel(
-            top_bar,
-            text="",
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_SUBTLE,
-        )
-        time_lbl.pack(side="right")
-        setattr(self, f"{prefix}_detail_time_lbl", time_lbl)
-
-        # Action Buttons Row
-        action_bar = ctk.CTkFrame(container, fg_color="transparent")
-        action_bar.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
-        setattr(self, f"{prefix}_detail_action_bar", action_bar)
-
-        btn_copy = ctk.CTkButton(
-            action_bar,
-            text="📋 Copy Context",
-            font=FONT_CAPTION_B,
-            height=28,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=6,
-            command=self._handle_copy_selected_context,
-        )
-        btn_copy.pack(side="left", padx=(0, 6))
-        setattr(self, f"{prefix}_btn_copy_context", btn_copy)
-
-        btn_prime = ctk.CTkButton(
-            action_bar,
-            text="⚡ Prime Task",
-            font=FONT_CAPTION,
-            height=28,
-            fg_color="#1a2235",
-            hover_color="#2a3550",
-            corner_radius=6,
-            command=self._handle_prime_from_selected,
-        )
-        btn_prime.pack(side="left", padx=(0, 6))
-
-        btn_url = ctk.CTkButton(
-            action_bar,
-            text="🌐 Open Site",
-            font=FONT_CAPTION,
-            height=28,
-            fg_color="#1a2235",
-            hover_color="#2a3550",
-            corner_radius=6,
-            command=self._handle_open_selected_url,
-        )
-        btn_url.pack(side="left", padx=(0, 6))
-        setattr(self, f"{prefix}_btn_open_url", btn_url)
-
-        btn_del = ctk.CTkButton(
-            action_bar,
-            text="🗑️ Delete",
-            font=FONT_CAPTION,
-            height=28,
-            width=70,
-            fg_color="#1a2235",
-            hover_color="#ef4444",
-            corner_radius=6,
-            command=self._handle_delete_selected_entry,
-        )
-        btn_del.pack(side="right")
-
-        # Context Reader Textbox
-        textbox = ctk.CTkTextbox(
-            container,
-            font=FONT_BODY,
-            fg_color=COLOR_BG_INSPECTOR,
-            border_width=1,
-            border_color=COLOR_BORDER,
-            wrap="word",
-            corner_radius=8,
-        )
-        textbox.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 10))
-        setattr(self, f"{prefix}_detail_textbox", textbox)
-
-        # Bottom Meta Footer
-        meta_box = ctk.CTkFrame(container, fg_color=COLOR_BG_MAIN, corner_radius=8, border_width=1, border_color=COLOR_BORDER)
-        meta_box.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
-        setattr(self, f"{prefix}_detail_meta_box", meta_box)
-
-        meta_lbl = ctk.CTkLabel(
-            meta_box,
-            text="Select any memory to view details.",
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-            padx=10,
-            pady=6,
-        )
-        meta_lbl.pack(fill="x")
-        setattr(self, f"{prefix}_detail_meta_lbl", meta_lbl)
-
-        # Also set unprefixed aliases pointing to the currently active inspector
-        # (for backward compatibility with action handlers)
-        if prefix == "feed":
-            self.detail_top_bar = top_bar
-            self.detail_action_bar = action_bar
-            self.detail_textbox = textbox
-            self.detail_meta_box = meta_box
-            self.detail_meta_lbl = meta_lbl
-            self.detail_quad_pill = quad_pill
-            self.detail_src_badge = src_badge
-            self.detail_time_lbl = time_lbl
-            self.btn_copy_context = btn_copy
-            self.btn_open_url = btn_url
-
-        # Set default empty state
-        self._set_inspector_empty_state_for(prefix)
-
-    def _get_inspector_widgets(self, prefix: str) -> dict:
-        """Get all inspector widgets for a given prefix."""
-        return {
-            "top_bar": getattr(self, f"{prefix}_detail_top_bar", None),
-            "action_bar": getattr(self, f"{prefix}_detail_action_bar", None),
-            "textbox": getattr(self, f"{prefix}_detail_textbox", None),
-            "meta_box": getattr(self, f"{prefix}_detail_meta_box", None),
-            "meta_lbl": getattr(self, f"{prefix}_detail_meta_lbl", None),
-            "quad_pill": getattr(self, f"{prefix}_detail_quad_pill", None),
-            "src_badge": getattr(self, f"{prefix}_detail_src_badge", None),
-            "time_lbl": getattr(self, f"{prefix}_detail_time_lbl", None),
-            "btn_copy": getattr(self, f"{prefix}_btn_copy_context", None),
-            "btn_url": getattr(self, f"{prefix}_btn_open_url", None),
-        }
-
-    def _set_active_inspector(self, prefix: str) -> None:
-        """Point unprefixed aliases to the specified inspector's widgets."""
-        w = self._get_inspector_widgets(prefix)
-        self.detail_top_bar = w["top_bar"]
-        self.detail_action_bar = w["action_bar"]
-        self.detail_textbox = w["textbox"]
-        self.detail_meta_box = w["meta_box"]
-        self.detail_meta_lbl = w["meta_lbl"]
-        self.detail_quad_pill = w["quad_pill"]
-        self.detail_src_badge = w["src_badge"]
-        self.detail_time_lbl = w["time_lbl"]
-        self.btn_copy_context = w["btn_copy"]
-        self.btn_open_url = w["btn_url"]
-
-    def _set_inspector_empty_state_for(self, prefix: str) -> None:
-        """Render empty placeholder for a specific inspector prefix."""
-        w = self._get_inspector_widgets(prefix)
-        if w["top_bar"]:
-            w["top_bar"].grid_remove()
-        if w["action_bar"]:
-            w["action_bar"].grid_remove()
-        if w["meta_box"]:
-            w["meta_box"].grid_remove()
-        if w["textbox"]:
-            w["textbox"].delete("1.0", "end")
-            empty_guide = (
-                "\n\n\n"
-                "          🦉  Select a Memory\n\n"
-                "     Click any card on the left to inspect:\n\n"
-                "     •  Full uncropped context & prompt history\n"
-                "     •  Source URLs, tokens & timestamps\n"
-                "     •  1-Click copy for Cursor, Claude & ChatGPT\n"
-                "     •  Instant task priming with ⚡ Prime Task\n\n"
-                "     💡  Cards appear in real-time as you\n"
-                "         browse, code, and capture!\n"
-            )
-            w["textbox"].insert("end", empty_guide)
-
-    def _set_inspector_empty_state(self) -> None:
-        """Render empty placeholder in the currently active inspector."""
-        prefix = "vault" if self.current_view == "vault" else "feed"
-        self._set_inspector_empty_state_for(prefix)
-        self.selected_entry = None
-
-    def _show_detail_inspector(self, entry: Dict[str, Any]) -> None:
-        """Display selected memory in the right detail pane."""
-        # Ensure we're writing to the correct inspector (feed vs vault)
-        prefix = "vault" if self.current_view == "vault" else "feed"
-        self._set_active_inspector(prefix)
-
-        self.selected_entry = entry
-        self.detail_top_bar.grid()
-        self.detail_action_bar.grid()
-        self.detail_meta_box.grid()
-
-        raw_text = entry.get("raw_text") or ""
-        summary = entry.get("summary") or ""
-        quadrant = (entry.get("quadrant") or "context").lower()
-        source_app = entry.get("source_app") or "browser"
-        timestamp = (entry.get("timestamp") or "")[:19].replace("T", " ")
-        project_name = entry.get("project_name") or "General"
-        eid = entry.get("id")
-
-        metadata = entry.get("source_metadata") or {}
-        if isinstance(metadata, str):
+        self.engine = CaptureEngine(self.db,http_port=port) if auto_start_engine else None
+        self.primer_engine = PrimerEngine(self.db,extraction_pipeline=self.engine.pipeline if self.engine else None)
+        self.title("OwlThread — State your task, get context.")
+        self.geometry("1180x800")
+        self.minsize(920,650)
+        self.configure(bg=BG)
+        self._closing = False
+        self.on_quit: Callable[[],None] | None = None
+        self._hotkey: WindowsHotkeyListener | None = None
+        self._actions: queue.Queue[Callable[[],None]] = queue.Queue()
+        self._workers: list[threading.Thread] = []
+        self._popups: list[PrimerPopupUI] = []
+        self._search_id: str | None = None
+        self._tick_id: str | None = None
+        self._refresh_id: str | None = None
+        self.current_view = "feed"
+        self.views: dict[str,tk.Frame] = {}
+        self._scrolls: list[ScrollFrame] = []
+        self._last_counts = (-1,-1)
+        # Initial reads happen before entering the event loop; later I/O uses _job.
+        self._settings = self.db.get_all_settings()
+        self._projects = self.db.list_projects()
+        self._rows: list[dict[str,Any]] = []
+        self._counts = (0,0)
+        self._view_revision = 0
+        self._refresh_busy = False
+        self.project = tk.StringVar(value=self._settings.get("active_project","General"))
+        self._style()
+        self._build()
+        self.protocol("WM_DELETE_WINDOW",self._on_close)
+        self.bind("<MouseWheel>",self._wheel)
+        self.bind("<Button-4>",self._wheel)
+        self.bind("<Button-5>",self._wheel)
+        self.bind("<Control-Shift-P>",lambda _:self.open_primer())
+        self.bind("<Control-Shift-p>",lambda _:self.open_primer())
+        self._tick()
+        self.show_view("feed")
+        if self.engine:
             try:
-                metadata = json.loads(metadata)
-            except Exception:
-                metadata = {}
+                self.engine.start()
+            except RuntimeError as exc:
+                self.footer.configure(text=str(exc),fg="#f59e0b")
+            self._hotkey = WindowsHotkeyListener(lambda:self._actions.put(self.open_primer))
+            self._hotkey.start()
+            if not self._hotkey.error:
+                self.unbind("<Control-Shift-P>")
+                self.unbind("<Control-Shift-p>")
+        self._refresh()
+        Animator.fade_in(self)
 
-        # Update Top Bar
-        quad_labels = {
-            "technical_architecture": ("🏗️ Technical Architecture", "#1e1b4b", "#a5b4fc"),
-            "business_rules": ("💼 Business Rules", "#064e3b", "#6ee7b7"),
-            "settled_decisions": ("🔒 Settled Decisions", "#3b0764", "#d8b4fe"),
-            "open_questions": ("❓ Open Questions", "#451a03", "#fde68a"),
-        }
-        q_label, q_bg, q_fg = quad_labels.get(quadrant, ("📌 General Context", "#1e293b", "#cbd5e1"))
-        self.detail_quad_pill.configure(text=q_label, fg_color=q_bg, text_color=q_fg)
-        self.detail_src_badge.configure(text=f"📁 {project_name} · {source_app}")
-        self.detail_time_lbl.configure(text=timestamp)
+    def _style(self) -> None:
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TCombobox",fieldbackground=CARD,background=CARD,foreground=TEXT,arrowcolor=MUTED,
+                        bordercolor="#42425e",padding=6)
+        style.map("TCombobox",fieldbackground=[("readonly",CARD)],foreground=[("readonly",TEXT)])
+        style.configure("Vertical.TScrollbar",background="#42425e",troughcolor=BG,arrowcolor=MUTED,borderwidth=0)
 
-        # Update URL button state
-        url = metadata.get("url") or ""
-        if url:
-            self.btn_open_url.configure(state="normal", text="🌐 Open URL")
-        else:
-            self.btn_open_url.configure(state="disabled", text="🌐 No URL")
+    def _build(self) -> None:
+        sidebar = tk.Frame(self,bg="#141425",width=64)
+        sidebar.pack(side="left",fill="y")
+        sidebar.pack_propagate(False)
+        logo = tk.Canvas(sidebar,width=64,height=78,bg="#141425",highlightthickness=0)
+        logo.pack()
+        logo.create_polygon(15,23,22,31,42,31,49,23,47,53,32,65,17,53,fill=ACCENT,smooth=True)
+        for x in (24,40):
+            logo.create_oval(x-7,34,x+7,48,fill="#141425",outline="")
+            logo.create_oval(x-2,38,x+2,44,fill=TEXT,outline="")
+        self.nav: dict[str,tk.Button] = {}
+        for key,symbol,title in (("feed","≡","Feed"),("search","⌕","Search"),("quadrants","▦","Memory"),("primer","ϟ","Ask"),("capture","+","Capture"),("integrations","⎈","Connect"),("settings","⚙","Settings")):
+            nav = tk.Button(sidebar,text=symbol+"\n"+title,command=lambda k=key:self.show_view(k),bg="#141425",fg=MUTED,
+                            activebackground="#2b2a48",activeforeground=TEXT,font=("Segoe UI",10),relief="flat",pady=12,cursor="hand2")
+            nav.pack(side="bottom" if key=="settings" else "top",fill="x",pady=3)
+            self.nav[key] = nav
+        container = tk.Frame(self,bg=BG)
+        container.pack(side="left",fill="both",expand=True,padx=34,pady=26)
+        header = tk.Frame(container,bg=BG)
+        header.pack(fill="x",pady=(0,24))
+        label(header,"OWLTHREAD  /  PERSONAL MEMORY",9,MUTED,True).pack(side="left")
+        self.project_menu = ttk.Combobox(header,textvariable=self.project,values=[p["name"] for p in self._projects],width=20)
+        self.project_menu.pack(side="right")
+        self.project_menu.bind("<<ComboboxSelected>>",self._project_changed)
+        self.project_menu.bind("<Return>",self._project_changed)
+        label(header,"Project   ",9,MUTED).pack(side="right")
+        self.page = tk.Frame(container,bg=BG)
+        self.page.pack(fill="both",expand=True)
+        self.footer = label(container,"Local storage  ·  No telemetry  ·  Ctrl+Shift+P for context",9,MUTED)
+        self.footer.pack(fill="x",pady=(14,0))
 
-        # Update Content
-        self.detail_textbox.delete("1.0", "end")
-        if summary:
-            self.detail_textbox.insert("end", f"SUMMARY: {summary}\n\n{'─' * 55}\n\n")
-        self.detail_textbox.insert("end", raw_text)
+    def _project_changed(self, event: tk.Event | None = None) -> None:
+        name = self.project.get().strip() or "General"
+        self.project.set(name)
+        def work() -> Any:
+            self.db.get_or_create_project(name)
+            self.db.set_setting("active_project",name)
+            return self._snapshot(name)
+        self._job(work,self._apply_snapshot)
 
-        # Update Meta Footer
-        word_count = len(raw_text.split())
-        c_type = metadata.get("container_type") or metadata.get("type") or "standard"
-        self.detail_meta_lbl.configure(
-            text=f"Entry #{eid} | Type: {c_type} | Words: {word_count} | Domain: {project_name}"
-        )
+    def _pid(self) -> int:
+        return next((p["id"] for p in self._projects if p["name"]==self.project.get()),0)
 
-        # Update card selection visual states
-        for card in self.feed_cards + self.vault_cards:
-            card.set_selected(card.entry.get("id") == eid)
+    def _snapshot(self, name: str) -> dict[str,Any]:
+        pid=self.db.get_or_create_project(name)
+        return {"name":name,"projects":self.db.list_projects(),"settings":self.db.get_all_settings(),
+                "rows":self.db.get_entries(project_id=pid,limit=500),
+                "counts":(self.db.count_entries(project_id=pid),self.db.pending_count()),
+                "pending":self.db.execute_read("SELECT id,source_app,extraction_status,extraction_reason,attempts,processed_chars FROM capture_buffer WHERE processed=0 AND project_id=? ORDER BY id LIMIT 100",(pid,))}
 
-    def _handle_copy_selected_context(self) -> None:
-        if not self.selected_entry:
+    def _apply_snapshot(self, data: dict[str,Any]) -> None:
+        self._refresh_busy=False
+        if data["name"] != self.project.get():
             return
-        raw_text = self.selected_entry.get("raw_text") or ""
-        copy_to_clipboard(raw_text)
-        self.btn_copy_context.configure(text="✓ Copied!", fg_color=COLOR_SUCCESS)
-        self.after(1500, lambda: self.btn_copy_context.configure(text="📋 Copy Context", fg_color=COLOR_PRIMARY))
+        changed=self._rows != data["rows"] or self._counts != data["counts"] or getattr(self,"_pending",[]) != data["pending"]
+        self._rows,self._counts,self._settings,self._projects=data["rows"],data["counts"],data["settings"],data["projects"]
+        self._pending=data["pending"]
+        self.project_menu.configure(values=[p["name"] for p in self._projects])
+        if changed and self.current_view in {"feed","quadrants"}:
+            self.show_view(self.current_view)
+        elif changed and self.current_view=="pending":
+            self._view_pending()
 
-    def _handle_prime_from_selected(self) -> None:
-        if not self.selected_entry:
+    def _mutate(self, work: Callable[[],Any], callback: Callable[[Any],None] | None = None) -> None:
+        name=self.project.get()
+        def run() -> Any:
+            result=work()
+            return result,self._snapshot(name)
+        def done(value: Any) -> None:
+            self._apply_snapshot(value[1])
+            if callback: callback(value[0])
+        self._job(run,done)
+
+    def _heading(self, title: str, subtitle: str) -> None:
+        label(self.page,title,28,bold=True).pack(fill="x",pady=(0,8))
+        label(self.page,subtitle,11,MUTED).pack(fill="x",pady=(0,24))
+
+    def _scroll(self, master: tk.Misc | None = None) -> ScrollFrame:
+        scroll = ScrollFrame(master or self.page)
+        scroll.pack(fill="both",expand=True)
+        self._scrolls.append(scroll)
+        return scroll
+
+    def show_view(self, key: str) -> None:
+        if self._closing:
             return
-        summary = self.selected_entry.get("summary") or self.selected_entry.get("raw_text", "")[:60]
-        self.show_view("primer")
-        self.primer_query_entry.delete(0, "end")
-        self.primer_query_entry.insert(0, summary)
-        self._handle_generate_primer()
+        aliases = {"live_feed":"feed","quick_dump":"capture","vault":"quadrants","sites":"settings"}
+        key = aliases.get(key,key)
+        self.current_view = key
+        self._view_revision += 1
+        if self._search_id:
+            self.after_cancel(self._search_id)
+            self._search_id = None
+        for child in self.page.winfo_children():
+            child.destroy()
+        self._scrolls.clear()
+        for name,nav in self.nav.items():
+            nav.configure(bg="#2c2b4a" if name==key else "#141425",fg=ACCENT if name==key else MUTED)
+        self.views[key] = self.page
+        getattr(self,"_view_"+key)()
 
-    def _handle_open_selected_url(self) -> None:
-        if not self.selected_entry:
-            return
-        metadata = self.selected_entry.get("source_metadata") or {}
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except Exception:
-                metadata = {}
-        url = metadata.get("url")
-        if url:
-            webbrowser.open(url)
-
-    def _handle_delete_selected_entry(self) -> None:
-        if not self.selected_entry:
-            return
-        eid = self.selected_entry.get("id")
-        if eid:
-            self._handle_delete_entry(int(eid))
-            self._set_inspector_empty_state()
-
-    def _on_search_key_release(self, event) -> None:
-        """Debounce search-as-you-type to prevent UI stutter."""
-        if self._search_debounce_timer:
-            self.after_cancel(self._search_debounce_timer)
-        self._search_debounce_timer = self.after(250, self.refresh_feed)
-
-    def _select_source_filter(self, source_key: str) -> None:
-        self.filter_source = source_key
-        for k, btn in self.source_chip_buttons.items():
-            if k == source_key:
-                btn.configure(fg_color=COLOR_PRIMARY, text_color="#ffffff")
-            else:
-                btn.configure(fg_color="transparent", text_color=COLOR_TEXT_MUTED)
+    def _view_feed(self) -> None:
+        self._heading("Your work, remembered.","A living record of the architecture, rules and decisions that matter.")
+        stats = tk.Frame(self.page,bg=BG)
+        stats.pack(fill="x",pady=(0,22))
+        count = self._counts[0]
+        label(stats,f"{count} active memories",13,bold=True).pack(side="left")
+        label(stats,f"   ·   {self._counts[1]} waiting to extract",10,MUTED).pack(side="left")
+        button(stats,"Extract now",lambda:self._job(self.primer_engine.pipeline.handle_done_signal,self._flush_done)).pack(side="right")
+        button(stats,"Pending captures",self._view_pending).pack(side="right",padx=6)
+        self.feed_scroll = self._scroll().content
         self.refresh_feed()
 
-    # -------------------------------------------------------------
-    # View 2: 📥 Quick Dump Box
-    # -------------------------------------------------------------
-    def _build_quick_dump_view(self) -> None:
-        frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.views["quick_dump"] = frame
-        frame.grid_columnconfigure(0, weight=1)
-
-        title_card = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        title_card.pack(fill="x", pady=(0, 12), padx=4)
-
-        ctk.CTkLabel(
-            title_card,
-            text="📥 Quick Memory Dump",
-            font=FONT_HEADING,
-            text_color=COLOR_TEXT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(14, 2))
-
-        ctk.CTkLabel(
-            title_card,
-            text="Instantly paste thoughts, meeting notes, code snippets, or links. OwlThread will extract durable facts into memory quadrants.",
-            font=FONT_CAPTION,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 14))
-
-        input_card = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        input_card.pack(fill="both", expand=True, padx=4)
-
-        proj_row = ctk.CTkFrame(input_card, fg_color="transparent")
-        proj_row.pack(fill="x", padx=16, pady=(14, 8))
-
-        ctk.CTkLabel(
-            proj_row,
-            text="Project Name:",
-            font=FONT_CAPTION_B,
-            text_color=COLOR_TEXT,
-        ).pack(side="left", padx=(0, 8))
-
-        self.dump_project_entry = ctk.CTkEntry(
-            proj_row,
-            placeholder_text="e.g. General, StripeBilling, AuthEngine",
-            font=FONT_CAPTION,
-            width=260,
-            fg_color=COLOR_BG_INPUT,
-            border_color=COLOR_BORDER,
-            corner_radius=8,
-        )
-        self.dump_project_entry.pack(side="left")
-
-        self.dump_textbox = ctk.CTkTextbox(
-            input_card,
-            font=FONT_BODY,
-            fg_color=COLOR_BG_INPUT,
-            border_width=1,
-            border_color=COLOR_BORDER,
-            corner_radius=8,
-            wrap="word",
-        )
-        self.dump_textbox.pack(fill="both", expand=True, padx=16, pady=(0, 12))
-
-        action_row = ctk.CTkFrame(input_card, fg_color="transparent")
-        action_row.pack(fill="x", padx=16, pady=(0, 14))
-
-        self.dump_status_lbl = ctk.CTkLabel(
-            action_row,
-            text="",
-            font=FONT_CAPTION,
-            text_color=COLOR_SUCCESS,
-        )
-        self.dump_status_lbl.pack(side="left")
-
-        dump_submit_btn = ctk.CTkButton(
-            action_row,
-            text="⚡ Dump into Memory",
-            font=FONT_TITLE,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=8,
-            height=34,
-            command=self._handle_submit_quick_dump,
-        )
-        dump_submit_btn.pack(side="right")
-
-    def _handle_submit_quick_dump(self) -> None:
-        raw_text = self.dump_textbox.get("1.0", "end").strip()
-        if not raw_text:
-            self.dump_status_lbl.configure(text="⚠️ Please write or paste some text first.", text_color=COLOR_DANGER)
-            return
-
-        project_name = self.dump_project_entry.get().strip() or "General"
-        self.dump_status_lbl.configure(text="Extracting durable knowledge...", text_color=COLOR_ACCENT)
-
-        def _worker():
-            try:
-                extracted = self.pipeline.flush_and_extract_text_immediately(
-                    raw_text=raw_text,
-                    source_app="direct",
-                    project_name=project_name,
-                )
-                self.after(0, lambda: self._on_quick_dump_success(len(extracted)))
-            except Exception as e:
-                logger.error("Error in quick dump: %s", e)
-                self.after(0, lambda: self.dump_status_lbl.configure(text=f"❌ Error: {e}", text_color=COLOR_DANGER))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_quick_dump_success(self, count: int) -> None:
-        self.dump_textbox.delete("1.0", "end")
-        self.dump_status_lbl.configure(
-            text=f"✅ Dumped! Extracted {count} knowledge items.",
-            text_color=COLOR_SUCCESS
-        )
-        self.refresh_feed()
-        self._update_status_counts()
-
-    # -------------------------------------------------------------
-    # View 3: 🗂️ Knowledge Vault (4 Quadrants)
-    # -------------------------------------------------------------
-    def _build_vault_view(self) -> None:
-        frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.views["vault"] = frame
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
-
-        quad_bar = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        quad_bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-
-        self.vault_buttons: Dict[str, ctk.CTkButton] = {}
-        quadrants = [
-            ("all", "All Vault"),
-            ("technical_architecture", "🏗️ Architecture"),
-            ("business_rules", "💼 Business Rules"),
-            ("settled_decisions", "🔒 Decisions"),
-            ("open_questions", "❓ Open Questions"),
-        ]
-
-        for q_key, label in quadrants:
-            btn = ctk.CTkButton(
-                quad_bar,
-                text=label,
-                font=FONT_CAPTION_B,
-                fg_color="transparent",
-                text_color=COLOR_TEXT_MUTED,
-                hover_color="#1a2235",
-                corner_radius=8,
-                command=lambda k=q_key: self._select_vault_quadrant(k),
-            )
-            btn.pack(side="left", padx=6, pady=8)
-            self.vault_buttons[q_key] = btn
-
-        self.vault_buttons["all"].configure(fg_color=COLOR_PRIMARY, text_color="#ffffff")
-
-        # Split Pane for Vault
-        split_pane = ctk.CTkFrame(frame, fg_color="transparent")
-        split_pane.grid(row=1, column=0, sticky="nsew")
-        split_pane.grid_columnconfigure(0, weight=0, minsize=400)
-        split_pane.grid_columnconfigure(1, weight=1)
-        split_pane.grid_rowconfigure(0, weight=1)
-
-        self.vault_scroll = ctk.CTkScrollableFrame(split_pane, width=410, fg_color="transparent")
-        self.vault_scroll.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self.vault_scroll.grid_columnconfigure(0, weight=1)
-
-        self.vault_detail_frame = ctk.CTkFrame(split_pane, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        self.vault_detail_frame.grid(row=0, column=1, sticky="nsew")
-        self._build_detail_inspector(self.vault_detail_frame, "vault")
-
-    def _select_vault_quadrant(self, quadrant_key: str) -> None:
-        self.selected_quadrant = quadrant_key
-        for key, btn in self.vault_buttons.items():
-            if key == quadrant_key:
-                btn.configure(fg_color=COLOR_PRIMARY, text_color=COLOR_TEXT)
-            else:
-                btn.configure(fg_color="transparent", text_color=COLOR_TEXT_MUTED)
-        self.refresh_feed()
-
-    # -------------------------------------------------------------
-    # View 4: 🌐 Site Access Manager (2-Way Extension Coordination)
-    # -------------------------------------------------------------
-    def _build_sites_view(self) -> None:
-        frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.views["sites"] = frame
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
-
-        # Header Card
-        hdr = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        hdr.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-
-        ctk.CTkLabel(
-            hdr,
-            text="🌐 Site Access Manager (2-Way Extension Sync)",
-            font=FONT_HEADING,
-            text_color=COLOR_TEXT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(14, 2))
-
-        ctk.CTkLabel(
-            hdr,
-            text="Manage which websites OwlThread reads from. Changes sync immediately with the browser extension!",
-            font=FONT_CAPTION,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 14))
-
-        # Sites Scrollable List
-        self.sites_scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent")
-        self.sites_scroll.grid(row=1, column=0, sticky="nsew")
-        self.sites_scroll.grid_columnconfigure(0, weight=1)
-
-    def refresh_sites_view(self) -> None:
-        """Fetch all sites permissions from database settings and display with toggles."""
-        for w in self.sites_scroll.winfo_children():
-            w.destroy()
-
-        sites_json = self.db.get_setting("site_permissions", "{}")
-        try:
-            sites_data = json.loads(sites_json) if sites_json else {}
-        except Exception:
-            sites_data = {}
-
-        # Also pull distinct hostnames seen in memory_entries
-        projects = self.db.list_projects()
-        for p in projects:
-            p_name = p.get("name", "")
-            if "." in p_name and p_name not in sites_data:
-                sites_data[p_name] = "allowed"
-
-        if not sites_data:
-            ctk.CTkLabel(
-                self.sites_scroll,
-                text="No sites registered yet. Visit any site with the browser extension to see it appear here!",
-                font=FONT_BODY,
-                text_color=COLOR_TEXT_MUTED,
-                pady=40,
-            ).pack()
-            return
-
-        for hostname, perm in sorted(sites_data.items()):
-            row = ctk.CTkFrame(self.sites_scroll, fg_color=COLOR_BG_CARD, corner_radius=8, border_width=1, border_color=COLOR_BORDER)
-            row.pack(fill="x", pady=4)
-
-            is_allowed = (perm == "allowed")
-            status_text = "🟢 Allowed" if is_allowed else "🔴 Blocked"
-            status_color = COLOR_SUCCESS if is_allowed else COLOR_DANGER
-
-            ctk.CTkLabel(
-                row,
-                text=f"🌐 {hostname}",
-                font=FONT_TITLE,
-                text_color=COLOR_TEXT,
-            ).pack(side="left", padx=14, pady=10)
-
-            ctk.CTkLabel(
-                row,
-                text=status_text,
-                font=FONT_CAPTION_B,
-                text_color=status_color,
-            ).pack(side="left", padx=10)
-
-            # Toggle button
-            new_status = "blocked" if is_allowed else "allowed"
-            toggle_text = "🚫 Block Site" if is_allowed else "✓ Allow Site"
-            toggle_color = "#1a2235" if is_allowed else COLOR_SUCCESS
-
-            btn = ctk.CTkButton(
-                row,
-                text=toggle_text,
-                font=FONT_SMALL_B,
-                width=100,
-                height=26,
-                fg_color=toggle_color,
-                hover_color="#ef4444" if is_allowed else "#16a34a",
-                corner_radius=6,
-                command=lambda h=hostname, s=new_status: self._toggle_site_permission(h, s),
-            )
-            btn.pack(side="right", padx=14, pady=10)
-
-    def _toggle_site_permission(self, hostname: str, new_status: str) -> None:
-        """Update permission in DB so extension immediately coordinates."""
-        sites_json = self.db.get_setting("site_permissions", "{}")
-        try:
-            sites_data = json.loads(sites_json) if sites_json else {}
-        except Exception:
-            sites_data = {}
-
-        sites_data[hostname] = new_status
-        self.db.set_setting("site_permissions", json.dumps(sites_data))
-        self.refresh_sites_view()
-        self._flash_status_beacon(f"{hostname} set to {new_status}!", COLOR_SUCCESS)
-
-    # -------------------------------------------------------------
-    # View 5: ⚡ Primer & Query Engine
-    # -------------------------------------------------------------
-    def _build_primer_view(self) -> None:
-        frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.views["primer"] = frame
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(2, weight=1)
-
-        head_card = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        head_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-
-        ctk.CTkLabel(
-            head_card,
-            text="⚡ Query & Context Primer Engine",
-            font=FONT_HEADING,
-            text_color=COLOR_TEXT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(14, 2))
-
-        ctk.CTkLabel(
-            head_card,
-            text="State your task — OwlThread will compile relevant project memory into a context brief ready to paste into your AI assistant.",
-            font=FONT_CAPTION,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 14))
-
-        input_card = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        input_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-
-        row1 = ctk.CTkFrame(input_card, fg_color="transparent")
-        row1.pack(fill="x", padx=16, pady=14)
-
-        self.primer_query_entry = ctk.CTkEntry(
-            row1,
-            placeholder_text="What are you about to do? e.g. integrate Stripe billing, audit release, send pitch...",
-            font=FONT_BODY,
-            fg_color=COLOR_BG_INPUT,
-            border_color=COLOR_BORDER,
-            corner_radius=8,
-        )
-        self.primer_query_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.primer_query_entry.bind("<Return>", lambda e: self._handle_generate_primer())
-
-        gen_btn = ctk.CTkButton(
-            row1,
-            text="🚀 Generate Primer",
-            font=FONT_TITLE,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=8,
-            height=34,
-            command=self._handle_generate_primer,
-        )
-        gen_btn.pack(side="right")
-
-        output_card = ctk.CTkFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        output_card.grid(row=2, column=0, sticky="nsew")
-        output_card.grid_columnconfigure(0, weight=1)
-        output_card.grid_rowconfigure(1, weight=1)
-
-        out_header = ctk.CTkFrame(output_card, fg_color="transparent")
-        out_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
-
-        self.primer_meta_lbl = ctk.CTkLabel(
-            out_header,
-            text="Ready to generate primer context.",
-            font=FONT_CAPTION,
-            text_color=COLOR_TEXT_MUTED,
-        )
-        self.primer_meta_lbl.pack(side="left")
-
-        self.copy_primer_btn = ctk.CTkButton(
-            out_header,
-            text="📋 Copy to Clipboard",
-            font=FONT_CAPTION_B,
-            width=140,
-            height=28,
-            fg_color="#1a2235",
-            hover_color="#2a3550",
-            corner_radius=6,
-            command=self._handle_copy_primer,
-        )
-        self.copy_primer_btn.pack(side="right")
-
-        self.primer_output_text = ctk.CTkTextbox(
-            output_card,
-            font=FONT_BODY,
-            fg_color=COLOR_BG_INPUT,
-            border_width=1,
-            border_color=COLOR_BORDER,
-            corner_radius=8,
-            wrap="word",
-        )
-        self.primer_output_text.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
-
-    def _handle_generate_primer(self) -> None:
-        query = self.primer_query_entry.get().strip()
-        if not query:
-            return
-
-        self.primer_meta_lbl.configure(text="Compiling contextual primer...", text_color=COLOR_ACCENT)
-        self.primer_output_text.delete("1.0", "end")
-        self.primer_output_text.insert("end", "Gathering relevant memories and compiling brief...")
-
-        def _worker():
-            try:
-                res = self.primer_engine.generate_primer(user_request=query, auto_copy=True)
-                self.after(0, lambda: self._on_primer_generated(res))
-            except Exception as e:
-                logger.error("Primer error: %s", e)
-                self.after(0, lambda: self.primer_meta_lbl.configure(text=f"Error: {e}", text_color=COLOR_DANGER))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_primer_generated(self, res) -> None:
-        self.primer_output_text.delete("1.0", "end")
-        self.primer_output_text.insert("end", res.primer_text)
-        self.primer_meta_lbl.configure(
-            text=f"Intent: {res.intent} | Matched: {len(res.matched_entries)} entries | Copied to clipboard ✓",
-            text_color=COLOR_SUCCESS
-        )
-
-    def _handle_copy_primer(self) -> None:
-        text = self.primer_output_text.get("1.0", "end").strip()
-        if text:
-            copy_to_clipboard(text)
-            self.copy_primer_btn.configure(text="✓ Copied!", fg_color="#16a34a")
-            self.after(1500, lambda: self.copy_primer_btn.configure(text="📋 Copy to Clipboard", fg_color="#334155"))
-
-    # -------------------------------------------------------------
-    # View 6: ⚙️ AI Engine, Prompts & Settings
-    # -------------------------------------------------------------
-    def _build_settings_view(self) -> None:
-        frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.views["settings"] = frame
-        frame.grid_columnconfigure(0, weight=1)
-
-        card = ctk.CTkScrollableFrame(frame, fg_color=COLOR_BG_CARD, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
-        card.pack(fill="both", expand=True, padx=4)
-
-        # 1. AI Engine Configuration Section
-        ctk.CTkLabel(
-            card,
-            text="🤖 AI Extraction & Synthesis Engine",
-            font=FONT_HEADING,
-            text_color=COLOR_TEXT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(14, 2))
-
-        ctk.CTkLabel(
-            card,
-            text="Select which AI model handles knowledge extraction, categorization, and context primers. Supports Gemini (Free), OpenAI, Claude, and local Ollama.",
-            font=FONT_CAPTION,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 12))
-
-        # Provider Selector
-        row_p = ctk.CTkFrame(card, fg_color="transparent")
-        row_p.pack(fill="x", padx=16, pady=4)
-        ctk.CTkLabel(row_p, text="Provider:", font=FONT_CAPTION_B, width=90, anchor="w", text_color=COLOR_TEXT_MUTED).pack(side="left")
-        self.ai_provider_menu = ctk.CTkOptionMenu(
-            row_p,
-            values=["Google Gemini (Free Tier)", "OpenAI (GPT-4o-mini)", "Anthropic (Claude 3.5)", "Ollama (Localhost)", "Offline Heuristic"],
-            font=FONT_CAPTION,
-            width=240,
-            fg_color="#1a2235",
-            button_color=COLOR_PRIMARY,
-            corner_radius=8,
-            command=self._on_provider_selected,
-        )
-        self.ai_provider_menu.pack(side="left")
-
-        # API Key Input
-        row_k = ctk.CTkFrame(card, fg_color="transparent")
-        row_k.pack(fill="x", padx=16, pady=4)
-        ctk.CTkLabel(row_k, text="API Key:", font=FONT_CAPTION_B, width=90, anchor="w", text_color=COLOR_TEXT_MUTED).pack(side="left")
-        self.ai_key_entry = ctk.CTkEntry(row_k, font=FONT_CAPTION, width=340, show="•", fg_color=COLOR_BG_INPUT, border_color=COLOR_BORDER, corner_radius=8)
-        self.ai_key_entry.pack(side="left", padx=(0, 6))
-
-        self.btn_toggle_key = ctk.CTkButton(
-            row_k,
-            text="👁️",
-            width=32,
-            height=28,
-            fg_color="#1a2235",
-            hover_color="#2a3550",
-            corner_radius=6,
-            command=self._toggle_key_visibility,
-        )
-        self.btn_toggle_key.pack(side="left")
-
-        # Model Input
-        row_m = ctk.CTkFrame(card, fg_color="transparent")
-        row_m.pack(fill="x", padx=16, pady=4)
-        ctk.CTkLabel(row_m, text="Model Name:", font=FONT_CAPTION_B, width=90, anchor="w", text_color=COLOR_TEXT_MUTED).pack(side="left")
-        self.ai_model_entry = ctk.CTkEntry(row_m, font=FONT_CAPTION, width=240, fg_color=COLOR_BG_INPUT, border_color=COLOR_BORDER, corner_radius=8)
-        self.ai_model_entry.pack(side="left")
-
-        # Base URL Input (for Ollama / OpenRouter)
-        row_u = ctk.CTkFrame(card, fg_color="transparent")
-        row_u.pack(fill="x", padx=16, pady=4)
-        ctk.CTkLabel(row_u, text="Base URL:", font=FONT_CAPTION_B, width=90, anchor="w", text_color=COLOR_TEXT_MUTED).pack(side="left")
-        self.ai_url_entry = ctk.CTkEntry(row_u, font=FONT_CAPTION, width=280, placeholder_text="e.g. http://localhost:11434/v1", fg_color=COLOR_BG_INPUT, border_color=COLOR_BORDER, corner_radius=8)
-        self.ai_url_entry.pack(side="left")
-
-        # AI Action Buttons (Test & Save)
-        ai_btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        ai_btn_row.pack(fill="x", padx=16, pady=(10, 16))
-
-        self.btn_test_ai = ctk.CTkButton(
-            ai_btn_row,
-            text="⚡ Test Connection",
-            font=FONT_CAPTION_B,
-            height=28,
-            fg_color="#1a2235",
-            hover_color="#2a3550",
-            corner_radius=6,
-            command=self._handle_test_ai_connection,
-        )
-        self.btn_test_ai.pack(side="left", padx=(0, 8))
-
-        self.btn_save_ai = ctk.CTkButton(
-            ai_btn_row,
-            text="💾 Save AI Engine",
-            font=FONT_CAPTION_B,
-            height=28,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=6,
-            command=self._handle_save_ai_settings,
-        )
-        self.btn_save_ai.pack(side="left", padx=(0, 10))
-
-        self.ai_status_badge = ctk.CTkLabel(ai_btn_row, text="", font=FONT_SMALL_B, text_color=COLOR_SUCCESS)
-        self.ai_status_badge.pack(side="left")
-
-        # Divider
-        ctk.CTkFrame(card, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=16, pady=10)
-
-        # 2. System Prompts Section
-        ctk.CTkLabel(
-            card,
-            text="🧠 System Prompts",
-            font=FONT_HEADING,
-            text_color=COLOR_TEXT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(6, 2))
-
-        ctk.CTkLabel(
-            card,
-            text="Extraction System Prompt (Categorizes raw captures into 4 quadrants):",
-            font=FONT_CAPTION_B,
-            text_color=COLOR_ACCENT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(8, 2))
-
-        self.setting_extract_box = ctk.CTkTextbox(card, font=FONT_BODY, fg_color=COLOR_BG_INPUT, border_width=1, border_color=COLOR_BORDER, corner_radius=8, height=90)
-        self.setting_extract_box.pack(fill="x", padx=16, pady=(0, 8))
-
-        ctk.CTkLabel(
-            card,
-            text="Primer Generation System Prompt (Compiles context briefs):",
-            font=FONT_CAPTION_B,
-            text_color=COLOR_ACCENT,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(6, 2))
-
-        self.setting_primer_box = ctk.CTkTextbox(card, font=FONT_BODY, fg_color=COLOR_BG_INPUT, border_width=1, border_color=COLOR_BORDER, corner_radius=8, height=90)
-        self.setting_primer_box.pack(fill="x", padx=16, pady=(0, 10))
-
-        save_p_btn = ctk.CTkButton(
-            card,
-            text="💾 Save Prompts",
-            font=FONT_CAPTION_B,
-            height=28,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
-            corner_radius=6,
-            command=self._handle_save_prompts,
-        )
-        save_p_btn.pack(anchor="w", padx=16, pady=(0, 16))
-
-        # Divider
-        ctk.CTkFrame(card, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=16, pady=6)
-
-        # 3. Danger Zone Section
-        danger_card = ctk.CTkFrame(card, fg_color="#180b0b", border_width=1, border_color="#5f1d1d", corner_radius=10)
-        danger_card.pack(fill="x", padx=16, pady=(10, 14))
-
-        ctk.CTkLabel(
-            danger_card,
-            text="⚠️ Danger Zone — Clean / Wipe Database",
-            font=FONT_TITLE,
-            text_color=COLOR_DANGER,
-            anchor="w",
-        ).pack(fill="x", padx=14, pady=(12, 4))
-
-        ctk.CTkLabel(
-            danger_card,
-            text="Permanently clear all memory entries and start fresh with 0 entries. Settings and AI keys will be preserved.",
-            font=FONT_SMALL,
-            text_color=COLOR_TEXT_MUTED,
-            anchor="w",
-        ).pack(fill="x", padx=14, pady=(0, 12))
-
-        reset_btn = ctk.CTkButton(
-            danger_card,
-            text="🗑️ Wipe Database / Clear All Data",
-            font=FONT_CAPTION_B,
-            fg_color=COLOR_DANGER,
-            hover_color="#dc2626",
-            corner_radius=6,
-            command=self._handle_reset_database,
-        )
-        reset_btn.pack(anchor="w", padx=14, pady=(0, 14))
-
-    def _toggle_key_visibility(self) -> None:
-        self._key_visible = not self._key_visible
-        self.ai_key_entry.configure(show="" if self._key_visible else "•")
-        self.btn_toggle_key.configure(text="🔒" if self._key_visible else "👁️")
-
-    def _on_provider_selected(self, choice: str) -> None:
-        c_low = choice.lower()
-        if "gemini" in c_low:
-            self.ai_model_entry.delete(0, "end")
-            self.ai_model_entry.insert(0, "gemini-2.0-flash")
-            self.ai_url_entry.delete(0, "end")
-        elif "openai" in c_low:
-            self.ai_model_entry.delete(0, "end")
-            self.ai_model_entry.insert(0, "gpt-4o-mini")
-            self.ai_url_entry.delete(0, "end")
-        elif "claude" in c_low:
-            self.ai_model_entry.delete(0, "end")
-            self.ai_model_entry.insert(0, "claude-3-5-haiku-latest")
-            self.ai_url_entry.delete(0, "end")
-        elif "ollama" in c_low:
-            self.ai_model_entry.delete(0, "end")
-            self.ai_model_entry.insert(0, "llama3")
-            self.ai_url_entry.delete(0, "end")
-            self.ai_url_entry.insert(0, "http://localhost:11434/v1")
-
-    def _load_settings_into_inputs(self) -> None:
-        # Load AI settings
-        db_provider = self.db.get_setting("llm_provider", "fallback")
-        provider_map = {
-            "gemini": "Google Gemini (Free Tier)",
-            "openai": "OpenAI (GPT-4o-mini)",
-            "anthropic": "Anthropic (Claude 3.5)",
-            "ollama": "Ollama (Localhost)",
-            "fallback": "Offline Heuristic",
-        }
-        self.ai_provider_menu.set(provider_map.get(db_provider, "Offline Heuristic"))
-
-        key = self.db.get_setting("llm_api_key", "")
-        self.ai_key_entry.delete(0, "end")
-        self.ai_key_entry.insert(0, key)
-
-        model = self.db.get_setting("llm_model", "")
-        self.ai_model_entry.delete(0, "end")
-        self.ai_model_entry.insert(0, model or ("gemini-2.0-flash" if db_provider == "gemini" else "gpt-4o-mini"))
-
-        url = self.db.get_setting("llm_base_url", "")
-        self.ai_url_entry.delete(0, "end")
-        self.ai_url_entry.insert(0, url)
-
-        # Load prompts
-        custom_extract = self.db.get_setting("extraction_prompt") or self.pipeline.extractor.active_system_prompt
-        custom_primer = self.db.get_setting("primer_prompt") or self.primer_engine.generator.active_system_prompt
-
-        self.setting_extract_box.delete("1.0", "end")
-        self.setting_extract_box.insert("end", custom_extract)
-
-        self.setting_primer_box.delete("1.0", "end")
-        self.setting_primer_box.insert("end", custom_primer)
-
-    def _handle_save_ai_settings(self) -> None:
-        choice = self.ai_provider_menu.get().lower()
-        if "gemini" in choice:
-            prov = "gemini"
-        elif "openai" in choice:
-            prov = "openai"
-        elif "claude" in choice:
-            prov = "anthropic"
-        elif "ollama" in choice:
-            prov = "ollama"
-        else:
-            prov = "fallback"
-
-        key = self.ai_key_entry.get().strip()
-        model = self.ai_model_entry.get().strip()
-        url = self.ai_url_entry.get().strip()
-
-        self.db.set_setting("llm_provider", prov)
-        self.db.set_setting("llm_api_key", key)
-        self.db.set_setting("llm_model", model)
-        self.db.set_setting("llm_base_url", url)
-
-        # Reload clients
-        self.pipeline.extractor.llm_client.reload_from_db(self.db)
-        self.primer_engine.generator.llm_client.reload_from_db(self.db)
-
-        self.ai_status_badge.configure(text="✓ Saved & Active!", text_color=COLOR_SUCCESS)
-        self.after(2500, lambda: self.ai_status_badge.configure(text=""))
-
-    def _handle_test_ai_connection(self) -> None:
-        self.btn_test_ai.configure(text="Testing...", state="disabled")
-        self.ai_status_badge.configure(text="Connecting to model...", text_color=COLOR_ACCENT)
-
-        # Temporarily apply in-memory settings to test
-        self._handle_save_ai_settings()
-
-        def _worker():
-            client = self.pipeline.extractor.llm_client
-            ok, msg = client.test_connection()
-            self.after(0, lambda: self._on_ai_test_finished(ok, msg))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_ai_test_finished(self, ok: bool, msg: str) -> None:
-        self.btn_test_ai.configure(text="⚡ Test Connection", state="normal")
-        if ok:
-            self.ai_status_badge.configure(text=f"🟢 {msg[:45]}", text_color=COLOR_SUCCESS)
-        else:
-            self.ai_status_badge.configure(text=f"🔴 {msg[:45]}", text_color=COLOR_DANGER)
-
-    def _handle_save_prompts(self) -> None:
-        new_extract = self.setting_extract_box.get("1.0", "end").strip()
-        new_primer = self.setting_primer_box.get("1.0", "end").strip()
-
-        if new_extract:
-            self.db.set_setting("extraction_prompt", new_extract)
-            self.pipeline.extractor.custom_system_prompt = new_extract
-        if new_primer:
-            self.db.set_setting("primer_prompt", new_primer)
-            self.primer_engine.generator.custom_system_prompt = new_primer
-
-        messagebox.showinfo("Prompts Saved", "System prompts updated and synced with extension!", parent=self)
-
-    def _handle_reset_database(self) -> None:
-        confirm = messagebox.askyesno(
-            "Confirm Database Wipe",
-            "Are you sure you want to delete ALL captured memories? This cannot be undone.",
-            parent=self
-        )
-        if confirm:
-            self.db.clear_entries()
-            self._set_inspector_empty_state()
-            self.refresh_feed()
-            self._update_status_counts()
-            messagebox.showinfo("Database Cleared", "All memories have been wiped. You now have a clean database!", parent=self)
-
-    # -------------------------------------------------------------
-    # Delete Entry Handler
-    # -------------------------------------------------------------
-    def _handle_delete_entry(self, entry_id: int) -> None:
-        """Delete an individual entry upon user clicking delete button."""
-        self.db.delete_entry(entry_id)
-        self.refresh_feed()
-        self._update_status_counts()
-        self._flash_status_beacon(f"Deleted #{entry_id}", COLOR_DANGER)
-
-    # -------------------------------------------------------------
-    # Feed Refresh & Filtering
-    # -------------------------------------------------------------
-    def _on_project_filter_changed(self, choice: str) -> None:
-        self.filter_project = choice
-        if choice != "All Projects":
-            self.db.get_or_create_project(name=choice)
-            self.db.set_setting("active_project", choice)
-        self.refresh_feed()
-
-    def _handle_create_project_dialog(self) -> None:
-        dialog = ctk.CTkInputDialog(
-            text="Enter project name (e.g. MySaaS, Billing, MobileApp):",
-            title="Create New Project"
-        )
-        val = dialog.get_input()
-        if val and val.strip():
-            name = val.strip()
-            self.db.get_or_create_project(name=name)
-            self.db.set_setting("active_project", name)
-            self.filter_project = name
-            all_projects = {p["id"]: p["name"] for p in self.db.list_projects()}
-            proj_names = ["All Projects"] + sorted(list(set(all_projects.values())))
-            self.project_menu.configure(values=proj_names)
-            self.project_menu.set(name)
-            self.refresh_feed()
-            self._flash_status_beacon(f"Project '{name}' created & active!", COLOR_SUCCESS)
+    def _view_pending(self) -> None:
+        for child in self.page.winfo_children(): child.destroy()
+        self._scrolls.clear()
+        self.current_view="pending"
+        self._heading("Pending captures","Raw captures stay local until extraction succeeds. Failed items can be retried.")
+        button(self.page,"Retry extraction",lambda:self._job(self.primer_engine.pipeline.handle_done_signal,self._flush_done)).pack(anchor="w",pady=(0,12))
+        pane=self._scroll().content
+        for row in getattr(self,"_pending",[]):
+            label(pane,f"#{row['id']} · {row['source_app']} · {row['extraction_status']} · {row['attempts']} attempts\n{row['extraction_reason'] or 'Waiting for extraction'}",11).pack(fill="x",pady=8)
+        if not getattr(self,"_pending",[]): label(pane,"No pending captures in this project.").pack(fill="x")
 
     def refresh_feed(self) -> None:
-        """Fetch matching entries from SQLite and render cards."""
-        proj_id = None
-        if self.filter_project != "All Projects":
-            projects = self.db.list_projects()
-            for p in projects:
-                if p["name"] == self.filter_project:
-                    proj_id = p["id"]
-                    break
+        for child in self.feed_scroll.winfo_children():
+            child.destroy()
+        rows = self._rows[:100]
+        self._cards(self.feed_scroll,rows)
 
-        search_txt = self.feed_search_entry.get().strip() if hasattr(self, "feed_search_entry") else ""
+    def _cards(self, master: tk.Misc, rows: list[dict[str,Any]]) -> None:
+        if not rows:
+            frame = tk.Frame(master,bg=CARD,padx=30,pady=40)
+            frame.pack(fill="x")
+            label(frame,"A little context goes a long way.",18,bold=True).pack(fill="x")
+            label(frame,"Capture a note or conversation, then extract it into lasting memory.\nYour first decision will appear here.",11,MUTED).pack(fill="x",pady=(12,20))
+            button(frame,"Capture your first note",lambda:self.show_view("capture"),True).pack(anchor="w")
+        for row in rows:
+            FeedCard(master,row,on_action=self._entry_action).pack(fill="x",pady=(0,12))
 
-        entries = self.db.get_entries(limit=60, project_id=proj_id, include_history=False)
+    def _entry_action(self, entry_id: int, action: str) -> None:
+        self._mutate(lambda:self.db.archive_entry(entry_id) if action=="archive" else self.db.supersede_entry(entry_id))
 
-        # Search filter
-        if search_txt:
-            st = search_txt.lower()
-            entries = [
-                e for e in entries
-                if st in (e.get("raw_text") or "").lower() or st in (e.get("summary") or "").lower()
-            ]
+    def _handle_delete_entry(self, entry_id: int) -> None:
+        self._entry_action(entry_id,"archive")
 
-        # Source chip filter
-        if self.filter_source != "all":
-            filtered = []
-            for e in entries:
-                src = (e.get("source_app") or "").lower()
-                meta = e.get("source_metadata") or {}
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except Exception:
-                        meta = {}
-                ctype = meta.get("container_type") or meta.get("type") or ""
+    def _view_search(self) -> None:
+        self._heading("Find the thread.","Search decisions, constraints and the details behind them.")
+        self.search_query = tk.StringVar()
+        entry = tk.Entry(self.page,textvariable=self.search_query,bg=CARD,fg=TEXT,insertbackground=ACCENT,font=("Segoe UI",14),relief="flat")
+        entry.pack(fill="x",ipady=13,pady=(0,20))
+        self.search_results = self._scroll().content
+        def changed(*_: Any) -> None:
+            if self._search_id:
+                self.after_cancel(self._search_id)
+            self._search_id = self.after(300,self._search)
+        self.search_query.trace_add("write",changed)
+        entry.focus_set()
+        self._search()
 
-                if self.filter_source in ("browser", "clipboard", "cursor"):
-                    if src == self.filter_source:
-                        filtered.append(e)
-                elif self.filter_source == "direct":
-                    if src == "direct" or ctype == "user_note":
-                        filtered.append(e)
-                elif self.filter_source == "user_message" and ctype == "user_message":
-                    filtered.append(e)
-                elif self.filter_source == "assistant_response" and ctype == "assistant_response":
-                    filtered.append(e)
-                elif self.filter_source == "user_selection" and ctype == "user_selection":
-                    filtered.append(e)
-            entries = filtered
-
-        # Quadrant filter if in Knowledge Vault
-        if self.current_view == "vault" and self.selected_quadrant != "all":
-            entries = [e for e in entries if e.get("quadrant") == self.selected_quadrant]
-
-        target_scroll = self.vault_scroll if self.current_view == "vault" else self.feed_scroll
-        cards_list = self.vault_cards if self.current_view == "vault" else self.feed_cards
-
-        # ── Diff-based refresh: compare entry IDs, skip if unchanged ──
-        new_ids = [e.get("id") for e in entries]
-        last_ids_attr = "_last_vault_ids" if self.current_view == "vault" else "_last_feed_ids"
-        old_ids = getattr(self, last_ids_attr, [])
-
-        # If entry IDs haven't changed, skip full rebuild (huge perf win)
-        if new_ids == old_ids and cards_list:
-            # Just update selection states
-            selected_id = self.selected_entry.get("id") if self.selected_entry else None
-            for card in cards_list:
-                card.set_selected(card.entry.get("id") == selected_id)
-            self._update_status_counts()
+    def _search(self) -> None:
+        self._search_id = None
+        if self.current_view!="search":
             return
-
-        # IDs changed — do full rebuild but in batches
-        setattr(self, last_ids_attr, new_ids)
-
-        for widget in target_scroll.winfo_children():
+        for widget in self.search_results.winfo_children():
             widget.destroy()
-        cards_list.clear()
+        query,pid,revision=self.search_query.get(),self._pid(),self._view_revision
+        def done(rows: Any) -> None:
+            if self.current_view=="search" and self._view_revision==revision and self.search_query.get()==query:
+                self._cards(self.search_results,rows)
+        self._job(lambda:MemorySearcher(self.db).search(query,limit=30,project_id=pid),done)
 
-        if not entries:
-            empty_lbl = ctk.CTkLabel(
-                target_scroll,
-                text="No memories found.\nStart chatting with the browser extension or use Quick Dump Box!",
-                font=FONT_BODY,
-                text_color=COLOR_TEXT_MUTED,
-                pady=40,
-            )
-            empty_lbl.pack()
-            self._set_inspector_empty_state()
-            self._update_status_counts()
-            return
+    def _view_quadrants(self) -> None:
+        self._heading("The shape of your memory.","Four perspectives. One shared understanding.")
+        grid = self._scroll().content
+        for index,(quadrant,color) in enumerate(QUADRANT_COLORS.items()):
+            grid.columnconfigure(index,weight=1,uniform="quadrants")
+            col = tk.Frame(grid,bg=CARD,padx=14,pady=20)
+            col.grid(row=0,column=index,sticky="nsew",padx=(0,10))
+            title = quadrant.replace("_"," ").title()
+            heading = label(col,"● "+title,11,color,True)
+            heading.configure(wraplength=145)
+            heading.pack(fill="x")
+            for row in [r for r in self._rows if r["quadrant"]==quadrant][:5]:
+                item = label(col,f"#{row['id']}\n{row['summary']}",11)
+                item.configure(wraplength=145)
+                item.pack(fill="x",pady=15)
+            def resize(event: tk.Event, frame: tk.Frame = col) -> None:
+                for child in frame.winfo_children():
+                    if isinstance(child,tk.Label):
+                        child.configure(wraplength=max(90,event.width-28))
+            col.bind("<Configure>",resize)
+            button(col,"Show all",lambda q=quadrant:self._show_quadrant(q)).pack(fill="x",pady=(15,0))
 
-        all_projects = {p["id"]: p["name"] for p in self.db.list_projects()}
-        proj_names = ["All Projects"] + sorted(list(set(all_projects.values())))
-        if hasattr(self, "project_menu"):
-            self.project_menu.configure(values=proj_names)
+    def _show_quadrant(self, quadrant: str) -> None:
+        for child in self.page.winfo_children():
+            child.destroy()
+        self._scrolls.clear()
+        self._heading(quadrant.replace("_"," ").title(),"Active memories in this quadrant")
+        button(self.page,"← All quadrants",lambda:self.show_view("quadrants")).pack(anchor="w",pady=(0,16))
+        self._cards(self._scroll().content,[r for r in self._rows if r["quadrant"]==quadrant])
 
-        selected_id = self.selected_entry.get("id") if self.selected_entry else None
+    def _view_primer(self) -> None:
+        self._panels = [p for p in getattr(self,"_panels",[]) if p._worker and p._worker.is_alive()]
+        self.primer_panel = PrimerPanel(self.page,self.primer_engine)
+        self.primer_panel.pack(fill="both",expand=True)
+        self._panels = getattr(self,"_panels",[])+[self.primer_panel]
 
-        # ── Batched card creation with stagger for smoothness ──
-        new_cards = []
-        for entry in entries:
-            entry_copy = dict(entry)
-            pid = entry_copy.get("project_id")
-            entry_copy["project_name"] = all_projects.get(pid, "General")
+    def _view_capture(self) -> None:
+        self._heading("Keep what matters.","Add a note, a decision or a conversation to your local capture buffer.")
+        self.note = tk.Text(self.page,bg=CARD,fg=TEXT,insertbackground=ACCENT,wrap="word",font=("Segoe UI",12),relief="flat",padx=20,pady=20)
+        self.note.pack(fill="both",expand=True,pady=(0,20))
+        button(self.page,"Save capture",self._save_capture,True).pack(anchor="e")
 
-            is_sel = (selected_id is not None and entry_copy.get("id") == selected_id)
-            card = MemoryFeedCard(
-                target_scroll,
-                entry=entry_copy,
-                on_select=self._show_detail_inspector,
-                on_copy=copy_to_clipboard,
-                on_delete=self._handle_delete_entry,
-                is_selected=is_sel,
-            )
-            card.pack(fill="x", pady=2)
-            cards_list.append(card)
-            new_cards.append(card)
+    def _save_capture(self) -> None:
+        text = self.note.get("1.0","end").strip()
+        if text:
+            name=self.project.get()
+            revision=self._view_revision
+            def done(_: Any) -> None:
+                if self.current_view=="capture" and self._view_revision==revision and self.note.get("1.0","end").strip()==text:
+                    self.note.delete("1.0","end")
+                self.footer.configure(text="Capture saved locally. Choose Extract now or type done in Primer.",fg="#62d6ad")
+            self._mutate(lambda:self.db.insert_capture(text,"manual",self.db.get_or_create_project(name)),done)
 
-        # Staggered fade-in for visual polish
-        if new_cards:
-            AnimationEngine.staggered_fade_in(new_cards, stagger_ms=25, duration_ms=150)
+    def _view_integrations(self) -> None:
+        """Show the permission catalog without pretending providers are connected."""
+        from owlthread.integrations.registry import IntegrationRegistry
+        self._heading("Connected ecosystem.","29 permission-scoped integration definitions share one OwlThread memory plane.")
+        intro = label(self.page,
+            "Every provider starts disabled and unconnected. Preparing read access records only an OwlThread grant for this project; provider authentication and a live adapter are still required. Admin, destructive and trading scopes are never granted here.",
+            10,MUTED)
+        intro.configure(wraplength=760,justify="left")
+        intro.pack(fill="x",pady=(0,16))
+        pane = self._scroll().content
+        registry = IntegrationRegistry(self.db)
+        for item in registry.list():
+            card = tk.Frame(pane,bg=CARD,padx=16,pady=14)
+            card.pack(fill="x",pady=(0,10))
+            top = tk.Frame(card,bg=CARD)
+            top.pack(fill="x")
+            label(top,item["name"],13,bold=True).pack(side="left")
+            state = "Prepared · not connected" if item["enabled"] else "Available · disabled"
+            label(top,state,9,"#62d6ad" if item["enabled"] else MUTED).pack(side="right")
+            label(card,f"{item['category']} · {str(item['connector_type']).upper()}\n{item['description']}",10,MUTED).pack(fill="x",pady=(7,8))
+            configured = item.get("configured_scopes") or []
+            if configured:
+                label(card,"Project grant: "+", ".join(configured),9,ACCENT).pack(fill="x",pady=(0,8))
+            action = (lambda integration_id=item["id"]: self._set_integration_read_access(integration_id,False)) if item["enabled"] else \
+                     (lambda integration_id=item["id"]: self._set_integration_read_access(integration_id,True))
+            button(card,"Disable grant" if item["enabled"] else "Prepare read-only",action).pack(anchor="e")
 
-        # Auto-select the first card if nothing is selected
-        if not self.selected_entry and entries:
-            self._show_detail_inspector(entries[0])
+    def _set_integration_read_access(self, integration_id: str, enabled: bool) -> None:
+        from owlthread.integrations.catalog import get_spec
+        from owlthread.integrations.registry import IntegrationRegistry
+        read_scopes = [scope.name for scope in get_spec(integration_id).scopes if scope.risk == "read"] if enabled else []
+        pid = self._pid() or None
+        def done(_: Any) -> None:
+            self.footer.configure(text=("Read-only grant prepared; connect the provider before use." if enabled else "Integration grant disabled."),fg="#62d6ad")
+            if self.current_view == "integrations":
+                self.show_view("integrations")
+        self._mutate(lambda:IntegrationRegistry(self.db).configure(integration_id,enabled=enabled,scopes=read_scopes,project_id=pid),done)
 
-        self._update_status_counts()
-
-    def _update_status_counts(self) -> None:
-        """Update count labels with smooth animated transitions."""
-        total = self.db.count_entries()
-        projects = self.db.list_projects()
-        domain_count = len(projects)
-
-        self.mem_count_lbl.configure(text=f"Memories: {total} active")
-
-        # Animated counter for memory count
-        if hasattr(self, "stat_mem_val") and total != self._last_mem_count:
-            old_val = max(0, self._last_mem_count) if self._last_mem_count >= 0 else 0
-            AnimationEngine.animate_counter(
-                self.stat_mem_val, old_val, total,
-                duration_ms=350, steps=12
-            )
-            self._last_mem_count = total
-
-        # Animated counter for domain count
-        if hasattr(self, "stat_domains_val") and domain_count != self._last_domain_count:
-            old_val = max(0, self._last_domain_count) if self._last_domain_count >= 0 else 0
-            AnimationEngine.animate_counter(
-                self.stat_domains_val, old_val, domain_count,
-                duration_ms=300, steps=10
-            )
-            self._last_domain_count = domain_count
-
-    def _flash_status_beacon(self, message: str, color: str) -> None:
-        """Flash status beacon with pulse glow when a live event occurs."""
-        self.beacon_lbl.configure(text=f"⚡ {message}", text_color=color)
-        # Pulse the sidebar status card border for attention
-        self.after(2500, lambda: self.beacon_lbl.configure(
-            text=f"🟢 Server: 127.0.0.1:{self.port}",
-            text_color=COLOR_SUCCESS
-        ))
-
-    def _handle_flush_done(self) -> None:
-        """Flush capture buffers manually upon user click."""
-        self.flush_btn.configure(text="Flushing...", state="disabled")
-
-        def _worker():
-            try:
-                res = self.pipeline.handle_done_signal()
-                self.after(0, lambda: self._on_flush_complete(res))
-            except Exception as e:
-                logger.error("Flush error: %s", e)
-                self.after(0, lambda: self.flush_btn.configure(text="❌ Error", state="normal"))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_flush_complete(self, res: Dict[str, Any]) -> None:
-        count = res.get("total_extracted", 0)
-        self.flush_btn.configure(text=f"✓ Flushed ({count})", fg_color="#16a34a", state="normal")
-        self.refresh_feed()
-        self.after(2000, lambda: self.flush_btn.configure(text="🏁 Task Done / Flush", fg_color=COLOR_PRIMARY))
-
-    def _schedule_periodic_poll(self) -> None:
-        """Sync status, project lists, brain badge, and memories periodically."""
-        self._update_status_counts()
-        self._sync_active_project_and_brain()
-
-        # Check server listener health
-        if hasattr(self, "beacon_lbl") and self.engine and self.engine.http_listener:
-            if not self.engine.http_listener.is_running:
-                err_text = f"🔴 Port {self.port} Blocked" if self.engine.http_listener_error else f"🔴 Server Offline ({self.port})"
-                self.beacon_lbl.configure(text=err_text, text_color=COLOR_DANGER)
-            elif not self.is_capture_paused and not str(self.beacon_lbl.cget("text")).startswith("⚡"):
-                self.beacon_lbl.configure(text=f"🟢 Server: 127.0.0.1:{self.port}", text_color=COLOR_SUCCESS)
-
-        self.after(5000, self._schedule_periodic_poll)
-
-    def _sync_active_project_and_brain(self) -> None:
-        # 1. Sync AI brain badge
-        provider = self.db.get_setting("llm_provider", "fallback")
-        has_key = bool(self.db.get_setting("llm_api_key", ""))
-        model = self.db.get_setting("llm_model", "gemini-2.0-flash")
-
-        if hasattr(self, "sidebar_brain_lbl"):
-            if has_key and provider != "fallback":
-                self.sidebar_brain_lbl.configure(
-                    text=f"🧠 Brain: {provider.upper()} ({model[:12]})",
-                    text_color=COLOR_SUCCESS
-                )
+    def _view_settings(self) -> None:
+        self._heading("Make yourself at home.","Local by default. Configure the tools that work for you.")
+        pane = self._scroll().content
+        label(pane,"BROWSER CONNECTION",10,ACCENT,True).pack(fill="x",pady=(0,10))
+        label(pane,"Copy the pairing secret into the extension popup → Connection settings. Keep it private.",10,MUTED).pack(fill="x")
+        button(pane,"Copy pairing secret",self._copy_pairing_secret).pack(anchor="w",pady=(10,20))
+        button(pane,"Revoke browser connections",lambda:self._copy_pairing_secret(True)).pack(anchor="w",pady=(0,20))
+        label(pane,"MODEL CONNECTION",10,ACCENT,True).pack(fill="x",pady=(0,10))
+        privacy = label(pane,"Fallback and local Ollama keep context on this machine. A remote provider receives the context used for extraction and briefs.",10,MUTED)
+        privacy.configure(wraplength=600)
+        privacy.pack(fill="x",pady=(0,16))
+        privacy.bind("<Configure>",lambda event:privacy.configure(wraplength=max(200,event.width)))
+        self.setting_vars: dict[str,tk.StringVar] = {}
+        for key,title in (("llm_provider","Provider"),("llm_model","Model"),("llm_api_key","API key"),("llm_base_url","Base URL")):
+            row = tk.Frame(pane,bg=BG)
+            row.pack(fill="x",pady=6)
+            label(row,title,11).pack(side="left",fill="x")
+            var = tk.StringVar(value=self._settings.get(key,"fallback" if key=="llm_provider" else ""))
+            self.setting_vars[key] = var
+            if key=="llm_provider":
+                widget = ttk.Combobox(row,textvariable=var,values=list(DEFAULTS),state="readonly",width=48)
+                widget.bind("<<ComboboxSelected>>",self._provider_changed)
             else:
-                self.sidebar_brain_lbl.configure(
-                    text="🧠 Brain: Offline (Click to set)",
-                    text_color=COLOR_WARNING
-                )
+                widget = tk.Entry(row,textvariable=var,bg=CARD,fg=TEXT,insertbackground=ACCENT,relief="flat",width=50,
+                                  show="•" if key=="llm_api_key" else "",font=("Segoe UI",11))
+            widget.pack(side="right",ipady=7)
+        if "llm_api_key" in self.db.unavailable_secret_settings:
+            label(pane,"Saved model key cannot be unlocked on this Windows account. Enter it again and save settings.",
+                  10,"#f59e0b").pack(fill="x",pady=(6,10))
+        self.connection_notice = label(pane,"",10,MUTED)
+        self.connection_notice.pack(fill="x",pady=6)
+        button(pane,"Test connection",self._test_connection).pack(anchor="e",pady=(0,24))
+        label(pane,"SYSTEM PROMPTS",10,ACCENT,True).pack(fill="x",pady=(0,12))
+        self.prompt_fields: dict[str,tk.Text] = {}
+        for key,title in (("extraction_prompt","Extraction instructions"),("primer_prompt","Primer instructions"),
+                          ("page_context_prompt","On-demand page awareness"),
+                          ("capture_importance_prompt","Legacy smart-capture gate (raw AI turns bypass this)")):
+            label(pane,title,11).pack(fill="x",pady=(8,6))
+            text = tk.Text(pane,height=4,bg=CARD,fg=TEXT,insertbackground=ACCENT,wrap="word",relief="flat",padx=12,pady=10,font=("Segoe UI",10))
+            text.insert("1.0",self._settings.get(key,""))
+            text.pack(fill="x")
+            self.prompt_fields[key] = text
+        label(pane,"Leave a prompt empty to restore the built-in instructions.",9,MUTED).pack(fill="x",pady=10)
+        self.paused = tk.BooleanVar(value=self._settings.get("capture_paused","false")=="true")
+        self.capture_options = {}
+        for key,title,default in (("strict_site_isolation","Strict site isolation (disables origin-blind clipboard monitoring)","true"),
+                                  ("clipboard_enabled","Read qualifying clipboard text (requires strict isolation off)","false"),
+                                  ("ide_capture_enabled","Read local Cursor and VS Code chat stores (experimental)","false")):
+            var=tk.BooleanVar(value=self._settings.get(key,default)=="true")
+            self.capture_options[key]=var
+            tk.Checkbutton(pane,text=title,variable=var,bg=BG,fg=TEXT,selectcolor=CARD,activebackground=BG,activeforeground=TEXT).pack(anchor="w",pady=6)
+        label(pane,"Capture source changes apply after restarting OwlThread. Keep strict isolation on to guarantee blocked-site text cannot enter through the clipboard, which has no source URL.",9,MUTED).pack(fill="x",pady=6)
+        tk.Checkbutton(pane,text="Pause browser, clipboard and IDE capture",variable=self.paused,bg=BG,fg=TEXT,selectcolor=CARD,
+                       activebackground=BG,activeforeground=TEXT).pack(anchor="w",pady=10)
+        button(pane,"Save settings",self._save_settings,True).pack(anchor="e",pady=10)
 
-        # 2. Sync project names if created from extension
-        all_projects = {p["id"]: p["name"] for p in self.db.list_projects()}
-        proj_names = ["All Projects"] + sorted(list(set(all_projects.values())))
-        if hasattr(self, "project_menu"):
-            curr_values = self.project_menu.cget("values")
-            if curr_values != proj_names:
-                self.project_menu.configure(values=proj_names)
+    def _copy_pairing_secret(self, rotate: bool = False) -> None:
+        from owlthread.security import local_token
+        def work() -> bool:
+            return self.primer_engine._copy(local_token(self.db,rotate=rotate))
+        self._job(work,lambda copied:self.footer.configure(text=("Connections revoked. " if rotate else "")+
+            ("Pairing secret copied. Paste it only into OwlThread's extension popup." if copied else "Clipboard unavailable. Try again.")))
 
-    # ─────────────────────────────────────────────────────────────
-    # Keyboard Shortcuts
-    # ─────────────────────────────────────────────────────────────
-    def _bind_keyboard_shortcuts(self) -> None:
-        """Bind keyboard shortcuts for power-user navigation."""
-        views = ["live_feed", "quick_dump", "vault", "sites", "primer", "settings"]
+    def _provider_changed(self, event: tk.Event | None = None) -> None:
+        base,model = DEFAULTS[self.setting_vars["llm_provider"].get()]
+        self.setting_vars["llm_base_url"].set(base)
+        self.setting_vars["llm_model"].set(model)
+        self.setting_vars["llm_api_key"].set("")
 
-        # Ctrl+1 through Ctrl+6 — view switching
-        for i, view_key in enumerate(views, start=1):
-            self.bind(f"<Control-Key-{i}>", lambda e, k=view_key: self.show_view(k))
+    def _save_settings(self) -> None:
+        values={key:var.get().strip() for key,var in self.setting_vars.items()}
+        values.update({key:field.get("1.0","end").strip() for key,field in self.prompt_fields.items()})
+        values["capture_paused"]="true" if self.paused.get() else "false"
+        values.update({key:"true" if var.get() else "false" for key,var in self.capture_options.items()})
+        self._mutate(lambda:[self.db.set_setting(key,value) for key,value in values.items()],
+            lambda _:self.footer.configure(text="Settings saved. New requests use this configuration.",fg="#62d6ad"))
 
-        # Ctrl+F — focus search bar
-        self.bind("<Control-f>", self._shortcut_focus_search)
-        self.bind("<Control-F>", self._shortcut_focus_search)
+    def _test_connection(self) -> None:
+        client = LLMClient(**{key.removeprefix("llm_"):var.get().strip() for key,var in self.setting_vars.items()})
+        self.connection_notice.configure(text="Testing connection…")
+        def done(result: Any) -> None:
+            if self.current_view=="settings":
+                self.connection_notice.configure(text=f"Connected · {result['latency_ms']} ms" if result["success"] else result["error"],
+                                                 fg="#62d6ad" if result["success"] else "#f59e0b")
+        self._job(client.test_connection,done)
 
-        # Ctrl+N — Quick Dump
-        self.bind("<Control-n>", lambda e: self.show_view("quick_dump"))
-        self.bind("<Control-N>", lambda e: self.show_view("quick_dump"))
+    def _job(self, work: Callable[[],Any], callback: Callable[[Any],None]) -> bool:
+        self._workers = [t for t in self._workers if t.is_alive()]
+        if len(self._workers)>=2:
+            self.footer.configure(text="Please wait for the current operation to finish.")
+            return False
+        def run() -> None:
+            try:
+                result = work()
+                self._actions.put(lambda:callback(result))
+            except Exception:
+                logger.exception("Desktop operation failed")
+                self._refresh_busy=False
+                self._actions.put(lambda:self.footer.configure(text="Operation failed. Your captures remain saved.",fg="#f59e0b"))
+        thread = threading.Thread(target=run,daemon=True,name="OwlThread-UIWorker")
+        self._workers.append(thread)
+        thread.start()
+        return True
 
-        # Ctrl+P — Primer
-        self.bind("<Control-p>", lambda e: self.show_view("primer"))
-        self.bind("<Control-P>", lambda e: self.show_view("primer"))
+    def _flush_done(self, result: dict[str,Any]) -> None:
+        self.footer.configure(text=f"Extracted {result['total_extracted']} memories · {result['total_superseded']} updated · {len(result.get('errors',[]))} errors",fg="#f59e0b" if result.get("errors") else "#62d6ad")
+        self._refresh_busy=False
+        self._job(lambda:self._snapshot(self._settings.get("active_project","General")),self._apply_snapshot)
 
-        # Escape — clear search or deselect
-        self.bind("<Escape>", self._shortcut_escape)
+    def open_primer(self) -> None:
+        self._popups = [p for p in self._popups if p.winfo_exists() or (p.panel._worker and p.panel._worker.is_alive())]
+        for popup in self._popups:
+            if popup.winfo_exists():
+                popup.lift()
+                popup.panel.input.focus_force()
+                popup._activity()
+                return
+        popup = PrimerPopupUI(self,self.primer_engine)
+        self._popups.append(popup)
 
-        # Up/Down arrows — navigate feed cards
-        self.bind("<Up>", lambda e: self._navigate_cards(-1))
-        self.bind("<Down>", lambda e: self._navigate_cards(1))
+    def _tick(self) -> None:
+        while not self._actions.empty() and not self._closing:
+            self._actions.get_nowait()()
+        if not self._closing:
+            self._tick_id = self.after(80,self._tick)
 
-    def _shortcut_focus_search(self, event=None) -> None:
-        """Focus the search entry if in live feed view."""
-        if self.current_view != "live_feed":
-            self.show_view("live_feed")
-        if hasattr(self, "feed_search_entry"):
-            self.feed_search_entry.focus_set()
-
-    def _shortcut_escape(self, event=None) -> None:
-        """Clear search text or deselect current entry."""
-        if hasattr(self, "feed_search_entry") and self.feed_search_entry.get():
-            self.feed_search_entry.delete(0, "end")
-            self._last_feed_ids.clear()  # Force refresh
-            self.refresh_feed()
-        else:
-            self._set_inspector_empty_state()
-
-    def _navigate_cards(self, direction: int) -> None:
-        """Navigate feed cards with up/down arrow keys."""
-        cards = self.vault_cards if self.current_view == "vault" else self.feed_cards
-        if not cards:
+    def _refresh(self) -> None:
+        if self._closing:
             return
+        if not self._refresh_busy:
+            name=self.project.get()
+            self._refresh_busy=True
+            if not self._job(lambda:self._snapshot(name),self._apply_snapshot):
+                self._refresh_busy=False
+        self._refresh_id = self.after(3000,self._refresh)
 
-        current_id = self.selected_entry.get("id") if self.selected_entry else None
-        current_idx = -1
-        for i, card in enumerate(cards):
-            if card.entry.get("id") == current_id:
-                current_idx = i
+    def _wheel(self, event: tk.Event) -> None:
+        # Text widgets own their wheel events; scroll only the pane under the pointer.
+        if isinstance(event.widget,tk.Text):
+            return
+        for scroll in self._scrolls:
+            if scroll.winfo_exists():
+                scroll.wheel(event)
                 break
 
-        new_idx = current_idx + direction
-        if 0 <= new_idx < len(cards):
-            self._show_detail_inspector(cards[new_idx].entry)
+    def _on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        if self._hotkey:
+            self._hotkey.stop()
+        if self.on_quit:
+            self.on_quit()
+        self.withdraw()
+        threads = self._workers+[p._worker for p in getattr(self,"_panels",[]) if p._worker]+[p.panel._worker for p in self._popups if p.panel._worker]
+        def shutdown() -> None:
+            if self.engine:
+                self.engine.stop()
+            for thread in threads:
+                thread.join()
+            if self._owns_db:
+                self.db.close()
+        worker = threading.Thread(target=shutdown,daemon=True,name="OwlThread-Shutdown")
+        worker.start()
+        def finish() -> None:
+            if worker.is_alive():
+                self.after(100,finish)
+            else:
+                self.destroy()
+        finish()
+
+    def destroy(self) -> None:
+        for task in (self._tick_id,self._refresh_id,self._search_id):
+            if task:
+                self.after_cancel(task)
+        super().destroy()
+
+
+OwlThreadDesktopApp = OwlThreadApp
 
 
 def run_app(port: int = DEFAULT_HTTP_PORT) -> None:
-    """Launch the OwlThread Desktop Application."""
-    app = OwlThreadDesktopApp(port=port)
+    app = OwlThreadApp(port=port)
     app.mainloop()
-
-
-if __name__ == "__main__":
-    run_app()

@@ -18,7 +18,22 @@ class TestFileConnectors(unittest.TestCase):
         self.db = Database(str(self.base_path / "owlthread_test.db"))
 
     def tearDown(self):
+        self.db.close()
         self.temp_dir.cleanup()
+
+    def test_workspace_mapping_and_unknown_store_never_use_active_project(self):
+        self.db.set_setting('active_project','Unrelated active project')
+        workspace=self.base_path/'workspaceStorage'/'known'
+        workspace.mkdir(parents=True)
+        project_root=self.base_path/'Mapped project'
+        (workspace/'workspace.json').write_text(json.dumps({'folder':project_root.as_uri()}))
+        connector=CursorConnector(self.db,base_dir=str(self.base_path))
+        connector.capture('Decision: Use SQLite for mapping tests.','cursor_ide',str(workspace/'state.vscdb'))
+        connector.capture('Decision: Keep unknown global chats separate.','cursor_ide',str(self.base_path/'globalStorage'/'state.vscdb'))
+        names={self.db.get_project_by_id(row['project_id'])['name'] for row in self.db.get_unprocessed_captures(10)}
+        self.assertIn('Mapped project',names)
+        self.assertTrue(any(name.startswith('Unassigned') for name in names))
+        self.assertNotIn('Unrelated active project',names)
 
     def test_cursor_connector_workspace_db(self):
         cursor_dir = self.base_path / "Cursor" / "User"
@@ -48,12 +63,13 @@ class TestFileConnectors(unittest.TestCase):
 
         connector = CursorConnector(self.db, base_dir=str(cursor_dir))
         connector.start()
+        self.addCleanup(connector.stop)
         captured_count = connector.poll()
 
         self.assertGreaterEqual(captured_count, 3)
-        self.assertEqual(self.db.count_entries(source_app="cursor"), captured_count)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "cursor_ide"]), captured_count)
 
-        entries = self.db.get_entries(source_app="cursor")
+        entries = [c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "cursor_ide"]
         raw_texts = [e["raw_text"] for e in entries]
         self.assertIn("Build a React navbar component", raw_texts)
         self.assertIn("Here is the navbar code", raw_texts)
@@ -88,15 +104,16 @@ class TestFileConnectors(unittest.TestCase):
 
         connector = VSCodeCopilotConnector(self.db, base_dir=str(vscode_dir))
         connector.start()
+        self.addCleanup(connector.stop)
         captured_count = connector.poll()
 
-        self.assertEqual(captured_count, 2)  # 1 prompt + 1 response
-        self.assertEqual(self.db.count_entries(source_app="copilot"), 2)
+        self.assertEqual(captured_count, 1)  # Complete user/assistant turn
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "vscode_copilot"]), 1)
 
-        entries = self.db.get_entries(source_app="copilot")
+        entries = [c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "vscode_copilot"]
         raw_texts = [e["raw_text"] for e in entries]
-        self.assertIn("How do I sort a list in Python?", raw_texts)
-        self.assertIn("Use the sorted() function or list.sort().", raw_texts)
+        self.assertIn("How do I sort a list in Python?", "\n".join(raw_texts))
+        self.assertIn("Use the sorted() function or list.sort().", "\n".join(raw_texts))
 
         # Append new message turn
         line1 = {
@@ -115,8 +132,8 @@ class TestFileConnectors(unittest.TestCase):
 
         # Second poll captures newly appended items
         new_count = connector.poll()
-        self.assertEqual(new_count, 2)
-        self.assertEqual(self.db.count_entries(source_app="copilot"), 4)
+        self.assertEqual(new_count, 1)
+        self.assertEqual(len([c for c in self.db.get_unprocessed_captures(100) if c["source_app"] == "vscode_copilot"]), 2)
 
         connector.stop()
 

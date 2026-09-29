@@ -1,3 +1,5 @@
-"""OwlThread - Universal Capture Engine."""
-
-__version__ = "0.1.0"
+"""OwlThread — State your task, get context."""
+from __future__ import annotations
+import logging
+logger = logging.getLogger(__name__)
+__version__ = "1.5.0"

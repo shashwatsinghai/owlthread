@@ -1,65 +1,34 @@
-"""Unit tests for BufferManager (chunked rolling buffer per project + source_app)."""
-
+"""Production SQLite capture buffering, restart recovery and explicit flushing."""
+import tempfile
 import unittest
-
-from owlthread.extraction.buffer import BufferManager
-
+from pathlib import Path
+from owlthread.db.database import Database
+from owlthread.extraction.pipeline import ExtractionPipeline
 
 class TestCaptureBuffer(unittest.TestCase):
-    """Test suite for capture buffering."""
-
-    def setUp(self):
-        # Set small threshold of 20 words for fast threshold testing
-        self.mgr = BufferManager(word_threshold=20)
-
-    def test_buffer_accumulation_per_project_and_source(self):
-        """Verify buffers are isolated per (project_id, source_app)."""
-        # Project 1, cursor (5 words)
-        batch1 = self.mgr.add_capture(project_id=1, source_app="cursor", raw_text="one two three four five")
-        self.assertIsNone(batch1)
-
-        # Project 2, cursor (5 words)
-        batch2 = self.mgr.add_capture(project_id=2, source_app="cursor", raw_text="apple banana orange grape pear")
-        self.assertIsNone(batch2)
-
-        stats = self.mgr.get_stats()
-        self.assertEqual(stats["project_1:cursor"]["word_count"], 5)
-        self.assertEqual(stats["project_2:cursor"]["word_count"], 5)
-
-    def test_buffer_auto_flush_on_5000_words_threshold(self):
-        """Verify automatic flush when word count meets or exceeds threshold."""
-        mgr = BufferManager(word_threshold=5000)
-        
-        # Add 3000 words
-        text_3000 = "word " * 3000
-        batch1 = mgr.add_capture(project_id=1, source_app="cursor", raw_text=text_3000)
-        self.assertIsNone(batch1)
-
-        # Add 2500 words (total 5500 >= 5000)
-        text_2500 = "token " * 2500
-        batch2 = mgr.add_capture(project_id=1, source_app="cursor", raw_text=text_2500)
-        self.assertIsNotNone(batch2)
-        self.assertEqual(batch2.project_id, 1)
-        self.assertEqual(batch2.source_app, "cursor")
-        self.assertEqual(batch2.word_count, 5500)
-        self.assertTrue(batch2.flush_timestamp)
-
-        # Buffer should now be cleared
-        stats = mgr.get_stats()
-        self.assertNotIn("project_1:cursor", stats)
-
-    def test_explicit_flush_all(self):
-        """Verify flush_all flushes all active buffers across all keys."""
-        self.mgr.add_capture(project_id=1, source_app="clipboard", raw_text="clip text 1 2 3")
-        self.mgr.add_capture(project_id=2, source_app="cli", raw_text="cli text 4 5 6")
-
-        flushed = self.mgr.flush_all()
-        self.assertEqual(len(flushed), 2)
-        
-        # Second flush should be empty
-        flushed_again = self.mgr.flush_all()
-        self.assertEqual(len(flushed_again), 0)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_buffers_isolated_per_project_and_source(self):
+        with tempfile.TemporaryDirectory() as temp, Database(str(Path(temp)/'memory.db')) as db:
+            pipeline=ExtractionPipeline(db)
+            pipeline.ingest_capture('Decision: Use SQLite WAL for durable writes.','cursor','A')
+            pipeline.ingest_capture('Decision: Use PostgreSQL for account records.','cli','B')
+            rows=db.execute_read('SELECT project_id,source_app FROM capture_buffer')
+            self.assertEqual(len(rows),2)
+            self.assertNotEqual(rows[0]['project_id'],rows[1]['project_id'])
+            self.assertNotEqual(rows[0]['source_app'],rows[1]['source_app'])
+    def test_pending_capture_survives_restart(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=str(Path(temp)/'memory.db')
+            with Database(path) as db:
+                db.insert_capture('Decision: Keep capture buffers in SQLite.','manual')
+            with Database(path) as db:
+                self.assertEqual(db.pending_count(),1)
+                self.assertEqual(ExtractionPipeline(db).handle_done_signal()['total_extracted'],1)
+    def test_flush_is_idempotent_and_retains_source(self):
+        with tempfile.TemporaryDirectory() as temp, Database(str(Path(temp)/'memory.db')) as db:
+            pipeline=ExtractionPipeline(db)
+            source='Decision: Preserve capture source for audit history.'
+            db.insert_capture(source,'manual')
+            self.assertEqual(pipeline.handle_done_signal()['total_extracted'],1)
+            self.assertEqual(pipeline.handle_done_signal()['total_extracted'],0)
+            self.assertEqual(db.pending_count(),0)
+            self.assertEqual(db.execute_read('SELECT raw_text FROM capture_buffer')[0]['raw_text'],source)

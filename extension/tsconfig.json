@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "none", "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true, "noEmitOnError": true, "skipLibCheck": true, "types": ["chrome"]
+  },
+  "files": ["policy.ts", "background.ts", "content.ts", "companion.ts", "popup/popup.ts"]
+}

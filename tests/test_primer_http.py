@@ -9,6 +9,7 @@ import urllib.request
 import urllib.error
 
 from owlthread.capture.server import LocalHttpListener
+from owlthread.security import local_token
 from owlthread.db.database import Database
 
 
@@ -24,7 +25,7 @@ class TestPrimerHttpEndpoints(unittest.TestCase):
         self.db.insert_entry(
             raw_text="Stripe checkout webhook integration tested and working on port 41789.",
             source_app="cursor",
-            quadrant="architecture"
+            quadrant="technical_architecture"
         )
 
         # Start listener on custom high port
@@ -35,6 +36,7 @@ class TestPrimerHttpEndpoints(unittest.TestCase):
 
     def tearDown(self):
         self.listener.stop()
+        self.db.close()
         self.tmp_dir.cleanup()
 
     def test_post_primer_endpoint(self):
@@ -44,7 +46,7 @@ class TestPrimerHttpEndpoints(unittest.TestCase):
         req = urllib.request.Request(
             url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Authorization":"Bearer "+local_token(self.db)},
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=5.0) as resp:
@@ -59,7 +61,7 @@ class TestPrimerHttpEndpoints(unittest.TestCase):
     def test_get_primer_query_param(self):
         """Verify GET /primer?q=... returns generated primer JSON."""
         url = f"http://127.0.0.1:{self.port}/primer?q=integrate+Stripe+billing"
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers={"Authorization":"Bearer "+local_token(self.db)})
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))

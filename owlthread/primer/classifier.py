@@ -1,5 +1,7 @@
 """Intent Classifier for OwlThread Query & Primer Engine."""
 
+from __future__ import annotations
+
 import logging
 import re
 from typing import Optional
@@ -34,7 +36,7 @@ Respond with ONLY the category identifier: dev_task, external_comms, status_quer
 class IntentClassifier:
     """Classifies user requests into dev_task, external_comms, status_query, or other."""
 
-    def __init__(self, llm_client: Optional[LLMClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
         self.llm_client = llm_client or LLMClient()
 
     def classify(self, user_request: str) -> str:
@@ -52,7 +54,16 @@ class IntentClassifier:
 
         cleaned = user_request.strip()
 
-        # Run LLM classification
+        # Common work intents are deterministic and free. Ask a configured model
+        # only for genuinely ambiguous text, so a normal primer needs at most the
+        # single synthesis call made by PrimerGenerator.
+        heuristic_intent = self.heuristic_classify(cleaned)
+        if heuristic_intent != INTENT_OTHER:
+            return heuristic_intent
+        if not self.llm_client.is_available():
+            return INTENT_OTHER
+
+        # Run LLM classification only for the ambiguous remainder.
         try:
             raw_response = self.llm_client.chat_complete(
                 system_prompt=CLASSIFIER_SYSTEM_PROMPT,
@@ -89,6 +100,14 @@ class IntentClassifier:
         Deterministic rule-based intent classification fallback.
         """
         text = user_request.strip().lower()
+        if re.search(r"\b(fix|debug|refactor|implement)\b", text):
+            return INTENT_DEV_TASK
+        if (re.search(r"\b(?:i(?:'m| am)?|we(?:'re| are)?|mai|main|hum)\b.{0,60}\b(?:going to |plan(?:ning)? to )?(?:build|create|make|develop)\b", text)
+                or re.search(r"\b(?:mai|main|hum)\b.{0,80}\b(?:banana|banane|banaunga|banaungi|banayenge|bana rahe|bana raha|bana rahi)\b", text)
+                or re.search(r"(?:मैं|हम).{0,80}(?:बनाने|बनाऊंगा|बनाऊंगी|बनाएंगे|बना रहा|बना रही)", text)):
+            return INTENT_DEV_TASK
+        if re.search(r"\bwhat (did|have) we decid", text):
+            return INTENT_STATUS_QUERY
 
         # 1. External comms indicators
         comms_patterns = [
@@ -184,6 +203,7 @@ class IntentClassifier:
             r"\btypescript\b",
             r"\bsql\b",
             r"\bmigrat\w*\b",
+            r"\bban(?:a|ana|ane|aunga|aungi|ayenge)\b",
         ]
         if any(re.search(pat, text) for pat in dev_patterns):
             return INTENT_DEV_TASK

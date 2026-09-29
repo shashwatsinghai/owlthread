@@ -16,6 +16,7 @@ class TestSchemaAndProjects(unittest.TestCase):
         self.db = Database(self.db_path)
 
     def tearDown(self):
+        self.db.close()
         self.tmp_dir.cleanup()
 
     def test_projects_table_and_general_fallback(self):
