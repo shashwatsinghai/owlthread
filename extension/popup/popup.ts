@@ -3,12 +3,18 @@
   const toggles: Record<string, string> = {enabled: "enabled", visible: "companionVisible", motion: "companionMotion"};
   let refreshing = false, actionVersion = 0, hostname = "", settingsVersion = 0, busy = false;
   let savedSettings: Record<string, unknown> = {};
+  let desktopProject="";
   get("pair").addEventListener("click",async()=>{
     const input=get<HTMLInputElement>("pair-token");
     const token=input.value.trim();input.value="";
     const result=await chrome.runtime.sendMessage({type:"pair",token});
-    notice(result?.ok ? "Paired. Your manual notes can now sync." : result?.error || "Pairing failed",!result?.ok);
+    notice(result?.ok ? "Paired. Saved captures are syncing automatically." : result?.error || "Pairing failed",!result?.ok);
     await refresh(false);
+  });
+  get("use-desktop-project").addEventListener("click",async()=>{
+    if(!desktopProject) return;
+    await chrome.storage.local.set({captureProject:desktopProject});
+    await settings();notice("New captures will be saved to "+desktopProject+". Existing queued captures keep their original project.");
   });
   get("save-project").addEventListener("click",async()=>{
     const project=get<HTMLInputElement>("capture-project").value.trim();
@@ -17,7 +23,7 @@
   });
   get("queue").addEventListener("toggle",async()=>{
     const saved=await chrome.storage.local.get({outbox:[]});
-    get("queue-items").textContent=(Array.isArray(saved.outbox) ? saved.outbox : []).map((item:any)=>`${item.payload.project || "Unassigned legacy capture"}\n${item.payload.text}`).join("\n\n") || "No queued captures.";
+    get("queue-items").textContent=(Array.isArray(saved.outbox) ? saved.outbox : []).map((item:any)=>`${item.state==="staged" ? "Waiting for AI reply" : "Ready to send"} · ${item.payload.project || "Unassigned legacy capture"}\n${item.payload.text}`).join("\n\n") || "No queued captures.";
   });
   get("clear-queue").addEventListener("click",async()=>{
     await chrome.runtime.sendMessage({type:"clear_queue"});get("queue-items").textContent="Queue cleared. Captures already sent to desktop remain there.";await settings();
@@ -48,6 +54,13 @@
     if(document.activeElement!==get("capture-project")) get<HTMLInputElement>("capture-project").value=String(saved.captureProject || "General");
     for (const [id, key] of Object.entries(toggles)) get<HTMLInputElement>(id).checked = saved[key] !== false;
     get("queued").textContent = String(Array.isArray(saved.outbox) ? saved.outbox.length : 0);
+    const outbox=Array.isArray(saved.outbox) ? saved.outbox : [];
+    const staged=outbox.filter((item:any)=>item.state==="staged").length;
+    const destination=String(saved.captureProject || "General");
+    const lastSynced=typeof saved.lastCapture==="number" ? new Date(saved.lastCapture).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}) : "";
+    get("transfer-note").textContent=outbox.length ? `${outbox.length-staged} ready to send${staged ? ` · ${staged} waiting for AI replies` : ""}. New captures go to ${destination}.` :
+      lastSynced ? `Last delivered at ${lastSynced} to ${String(saved.lastSyncedProject || destination)}. New captures go to ${destination}.` : `New captures go to ${destination}. Delivered captures appear in the app before extraction.`;
+    if(typeof saved.lastError==="string" && saved.lastError && outbox.length) get("transfer-note").textContent+=" "+saved.lastError;
     renderSite();
   }
   async function refresh(updateNotice = true): Promise<void> {
@@ -57,17 +70,21 @@
     try {
       await settings();
       const health = await chrome.runtime.sendMessage({type: "health"});
-      get("status").textContent = health?.ok ? "Desktop connected" : "Desktop offline";
+      get("status").textContent = health?.ok ? "Desktop connected" : health?.connection==="unpaired" ? "Browser not paired" :
+        health?.connection==="pairing_required" ? "Pairing needs renewal" : health?.connection==="error" ? "Desktop needs attention" : "Desktop offline";
       get("status").classList.toggle("online", health?.ok === true);
       get("connection-dot").classList.toggle("online", health?.ok === true);
       get("model").textContent = health?.ok ? health.model_ready && health.model_name ?
         "AI synthesis · " + health.model_name + " · managed in app" : "Automatic raw capture works locally; configure a model only for synthesis." :
-        "Manual notes wait here. Open OwlThread to connect.";
+        health?.error || "Captures wait here. Open OwlThread to connect.";
+      desktopProject=health?.ok && typeof health.active_project==="string" ? health.active_project : "";
+      get<HTMLButtonElement>("use-desktop-project").hidden=!desktopProject;
+      get("use-desktop-project").textContent="Use desktop project: "+desktopProject;
       get("memories").textContent = health?.ok ? String(health.total_entries ?? 0) : "—";
       get("pending").textContent = health?.ok ? String(health.pending_captures ?? 0) : "—";
       if (updateNotice && version === actionVersion) notice(health?.ok ?
         "One memory across your browsers. Model settings and full history stay in OwlThread." :
-        "Saves queue locally while the desktop is offline, including staged AI prompts.");
+        health?.error || "Saves queue locally while the desktop is offline, including staged AI prompts.");
     } catch {
       get("status").textContent = "Connection unavailable";
       if (version === actionVersion) notice("Reload the extension, then reopen this popup.", true);
@@ -104,7 +121,7 @@
         await refresh(false);
         const count = result.total_extracted ?? 0;
         notice(type === "show_owl" ? "Your small owl is on the page. Close this popup to meet it." :
-          type === "retry" ? "Connected. Your saved notes have synced to OwlThread." :
+          type === "retry" ? "Connected. Ready captures have synced; staged prompts wait for their AI replies." :
           type === "flush" ? "Extracted " + count + " " + (count === 1 ? "memory" : "memories") + "." + (result.errors?.length ? " Some captures need another try." : "") :
           "Remembered. Saved here for sync to OwlThread.");
       } catch { notice("Could not connect to the extension. Reload it and try again.", true); }
@@ -134,6 +151,8 @@
     } catch { history.textContent = "Open OwlThread to see your shared memories. Full history and controls are in the app."; }
   });
   chrome.storage.onChanged.addListener((_changes, area) => { if (area === "local") void settings().catch(() => undefined); });
+  // Opening the app while this popup is open should update status and resume delivery.
+  setInterval(()=>{if(!document.hidden && !busy) void refresh(false);},5000);
   void (async () => {
     try {
       const [tab] = await chrome.tabs.query({active: true, currentWindow: true});

@@ -26,7 +26,7 @@ class IntegrationConfig:
 
 
 class IntegrationRegistry:
-    """Catalog plus durable grants; it deliberately owns no credentials or clients."""
+    """Catalog plus durable grants and honest local client setup snapshots."""
 
     def __init__(self, db: SettingsStore) -> None:
         self.db = db
@@ -72,7 +72,8 @@ class IntegrationRegistry:
         })
         if error:
             result["configuration_error"] = error
-        return result
+        from owlthread.integrations.context import enrich_status
+        return enrich_status(self.db, result)
 
     def list(self) -> list[dict[str, Any]]:
         return [self.status(item.integration_id, include_scope_details=False) for item in list_catalog()]

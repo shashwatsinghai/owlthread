@@ -121,7 +121,7 @@
         <div class="intro"><div class="eyebrow">A little wiser, together</div><h2>Just the useful bits.</h2><p class="site-copy">Remember the current AI turn or this page.<br>No text selection needed.</p></div><div class="awareness"><span class="awareness-icon">◉</span><span class="awareness-text">Page text stays here until you ask for understanding or press Remember.</span></div><button class="text-btn understand">Understand this page ↗</button>
         <div class="connection"><span class="dot"></span><span class="connection-text">Browser ready</span><span class="count">0 queued</span></div>
         <div class="actions"><button class="action primary capture"><span>Remember current turn / page</span><span class="arrow">↗</span></button><button class="action extract"><span>Extract saved memories</span><span class="arrow">✧</span></button></div>
-        <label class="setting"><span>Filter new AI replies for memory</span><input class="auto" type="checkbox" checked></label>
+        <label class="setting"><span>Save new AI turns automatically</span><input class="auto" type="checkbox" checked></label>
         <p class="feedback" role="status" aria-live="polite">Saved on this device. You're in control.</p>
         <div class="panel-footer"><span>SAVED TO OWLTHREAD</span><button class="text-btn hide">Never on this site</button></div>
       </section>
@@ -138,7 +138,7 @@
     const aiSite = OwlPolicy.aiSites.includes(hostname);
     const youtube = location.hostname === "youtube.com" || location.hostname.endsWith(".youtube.com") || location.hostname === "youtu.be";
     if (aiSite) {
-        get(".site-copy").textContent = "I check completed AI responses for durable context. You can also choose text yourself.";
+        get(".site-copy").textContent = "New prompts and completed replies are saved together. Remember also saves the current turn.";
         get(".capture span").textContent = "Remember current turn / page";
     }
     else if (youtube) {
@@ -152,7 +152,7 @@
     const changedSettings = new Set();
     let siteSettings = {};
     let x = Math.max(12, innerWidth - 84), y = Math.max(12, innerHeight - 108);
-    let queued = 0, connected = false, modelLabel = "", busy = false, dragged = false;
+    let queued = 0, connected = false, modelLabel = "", connectionLabel = "Desktop offline", busy = false, dragged = false;
     let awareUrl = "", awareAt = 0;
     let awareFingerprint = "";
     let awarenessVersion = 0;
@@ -214,7 +214,7 @@
         dock.classList.toggle("paused", !enabled);
         get(".state-text").textContent = currentActivity === "saving" ? "Taking notes…" : currentActivity === "inspecting" ? "Looking closer…" :
             currentActivity === "done" ? "Noted ✓" : queued ? `${queued} queued` : !enabled && aiSite ? "Auto-save paused" : connected ? "Memory connected" : "Ready to capture";
-        get(".connection-text").textContent = connected ? modelLabel || "Desktop connected" : "Desktop offline";
+        get(".connection-text").textContent = connected ? modelLabel || "Desktop connected" : connectionLabel;
         get(".count").textContent = `${queued} queued`;
     }
     async function checkHealth() {
@@ -222,10 +222,12 @@
         if (disposed)
             return;
         connected = health.ok === true;
+        connectionLabel = health.connection === "unpaired" ? "Browser not paired" : health.connection === "pairing_required" ? "Pairing needs renewal" :
+            health.connection === "error" ? "Desktop needs attention" : "Desktop offline";
         modelLabel = health.model_ready && health.model_name ? health.model_name : "";
         renderStatus();
         if (!busy && !feedback.dataset.action)
-            notice(connected ? "Captures sync to OwlThread. A model is optional for later synthesis." : "Desktop offline. Captures remain safely queued in this browser.");
+            notice(connected ? "Captures sync to OwlThread. A model is optional for later synthesis." : health.error || "Captures remain safely queued in this browser.");
     }
     function activity(state) {
         clearTimeout(activityTimer);

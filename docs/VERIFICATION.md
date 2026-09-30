@@ -1,5 +1,9 @@
 # Verification report — 2026-09-14
 
+## Current follow-up: 1.6.0 — 2026-09-30
+
+See [the 1.6.0 verification report](VERIFICATION-2026-09-30.md) for the Chrome transfer fixes, raw-capture desktop view, built-in Cloudflare/GitHub context clients, 203 Python tests, 28 extension tests and current Windows build checks. The older readiness scores below describe the historical 1.5.0 audit and are not updated scores for 1.6.0.
+
 ## 2026-09-23 launcher follow-up
 
 `run.bat` now opens the visible desktop, and the packaged executable opens it when started without arguments. Tray mode remains available through `start`. Desktop and tray startup passed against isolated databases; the desktop window was confirmed visible, and the authenticated local API responded. Unused CLI and capture-source imports now load only when needed. A local Windows build and the 1.5.0 ZIPs, wheel and source archive were refreshed from current sources.

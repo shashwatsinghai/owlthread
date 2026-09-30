@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import datetime, timezone
 import logging
 import re
@@ -14,6 +15,18 @@ SECRET_SETTINGS = {"local_api_token", "llm_api_key"}
 EXTENSION_ORIGIN = re.compile(r"chrome-extension://[a-p]{32}\Z")
 MAX_CAPTURE = 200_000
 logger = logging.getLogger(__name__)
+
+
+def is_secret_setting(key: str) -> bool:
+    return key in SECRET_SETTINGS or key.startswith("integration_credential:")
+
+
+def paired_origin_count(db: Any) -> int:
+    try:
+        origins = json.loads(db.get_setting("authorized_origins", "[]"))
+        return len({origin for origin in origins if isinstance(origin, str) and EXTENSION_ORIGIN.fullmatch(origin)}) if isinstance(origins, list) else 0
+    except (ValueError, TypeError):
+        return 0
 
 
 def protect(value: str) -> str:

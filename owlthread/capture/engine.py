@@ -9,6 +9,7 @@ from owlthread.capture.server import LocalHttpListener
 from owlthread.config import DEFAULT_HTTP_PORT, CONNECTOR_POLL_INTERVAL
 from owlthread.db.database import Database
 from owlthread.extraction.pipeline import ExtractionPipeline
+from owlthread.security import paired_origin_count
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,8 @@ class CaptureEngine:
                                  "host":"127.0.0.1","port":self.http_listener.port if self.http_listener else None},
                 "connectors":[{"name":c.name,"is_running":c.is_running,"error":c.last_error} for c in self.connectors],
                 "total_entries":self.db.count_entries(),"pending_captures":self.db.pending_count(),
+                "capture_transfer":self.db.capture_status(),"authorized_browser_count":paired_origin_count(self.db),
+                "active_project":self.db.get_setting("active_project","General"),
                 "capture_paused":self.db.get_setting("capture_paused","false")=="true",
                 "strict_site_isolation":self.strict_site_isolation,
                 "model_provider":self.pipeline.llm_client.provider,"model_name":self.pipeline.llm_client.model,

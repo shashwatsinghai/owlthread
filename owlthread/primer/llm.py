@@ -12,13 +12,15 @@ import urllib.request
 from typing import Any
 
 logger = logging.getLogger(__name__)
+QWEN_MEMORY_REASONING = "medium"
+QWEN_MEMORY_TOKEN_BUDGET = 4096
 DEFAULTS = {
     "openai": ("https://api.openai.com/v1","gpt-4o-mini"),
     "ollama": ("http://localhost:11434/v1","llama3"),
     "anthropic": ("https://api.anthropic.com/v1","claude-sonnet-4-5"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta","gemini-3.5-flash-lite"),
     "custom": ("",""),
-    "groq": ("https://api.groq.com/openai/v1",""),
+    "groq": ("https://api.groq.com/openai/v1","qwen/qwen3.8-27b"),
     "fallback": ("",""),
 }
 
@@ -35,7 +37,9 @@ class LLMClient:
         self._retry_after = 0.0
         provider = provider or os.environ.get("OWLTHREAD_LLM_PROVIDER","")
         if provider in {"","auto","default"}:
-            if api_key and api_key.startswith("sk-ant-"):
+            if api_key and api_key.startswith("gsk_"):
+                provider = "groq"
+            elif api_key and api_key.startswith("sk-ant-"):
                 provider = "anthropic"
             elif api_key and api_key.startswith("AIza"):
                 provider = "gemini"
@@ -47,6 +51,8 @@ class LLMClient:
                 provider = "anthropic"
             elif os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
                 provider = "gemini"
+            elif os.environ.get("GROQ_API_KEY"):
+                provider = "groq"
             else:
                 provider = "fallback"
         self.provider = provider.lower()
@@ -81,7 +87,17 @@ class LLMClient:
                 return bool(self.base_url and self.model)
             return self.provider in {"openai","anthropic","gemini","groq"} and bool(self.api_key)
 
-    def _request(self, system: str, user: str, temperature: float, max_tokens: int) -> str:
+    def memory_generation_options(self, max_tokens: int) -> dict[str, Any]:
+        """Durable decisions and evidence synthesis warrant more reasoning than labels."""
+        with self._lock:
+            model = self.model or DEFAULTS.get(self.provider, ("", ""))[1]
+            if self.provider == "groq" and model == "qwen/qwen3.8-27b":
+                return {"reasoning_effort": QWEN_MEMORY_REASONING,
+                        "max_tokens": QWEN_MEMORY_TOKEN_BUDGET}
+        return {"max_tokens": max_tokens}
+
+    def _request(self, system: str, user: str, temperature: float, max_tokens: int,
+                 reasoning_effort: str = "none") -> str:
         with self._lock:
             provider,key,base,model = self.provider,self.api_key,self.base_url,self.model
         default_base,default_model = DEFAULTS.get(provider,("",""))
@@ -94,7 +110,7 @@ class LLMClient:
             raise ValueError("Invalid provider base URL")
         if parsed.scheme == "http" and parsed.hostname not in {"localhost","127.0.0.1","::1"}:
             raise ValueError("Remote model endpoints must use HTTPS")
-        headers = {"Content-Type":"application/json"}
+        headers = {"Content-Type":"application/json", "User-Agent":"OwlThread/1.5"}
         payload: dict[str,Any]
         if provider == "anthropic":
             url = base + "/messages"
@@ -113,9 +129,15 @@ class LLMClient:
                 headers["Authorization"] = "Bearer "+key
             payload = {"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}]}
             official = provider == "openai" and urllib.parse.urlsplit(base).hostname == "api.openai.com"
-            payload["max_completion_tokens" if official else "max_tokens"] = max_tokens
+            payload["max_completion_tokens" if official or provider == "groq" else "max_tokens"] = max_tokens
             if not (official and (model.startswith(("o1","o3","o4","gpt-5","gpt-6")))):
                 payload["temperature"] = temperature
+            if provider == "groq" and model == "qwen/qwen3.8-27b":
+                if reasoning_effort not in {"none", "default", "low", "medium", "high"}:
+                    raise ValueError("Invalid Qwen reasoning effort")
+                # Keep reasoning out of JSON extraction and saved context briefs.
+                payload.update(reasoning_effort=reasoning_effort, reasoning_format="parsed",
+                               top_p=0.95, stream=False)
         request = urllib.request.Request(url,data=json.dumps(payload).encode("utf-8"),headers=headers,method="POST")
         # Never send provider keys through redirects or local requests through an ambient proxy.
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -125,7 +147,10 @@ class LLMClient:
         if parsed.hostname in {"localhost","127.0.0.1","::1"}:
             handlers.append(urllib.request.ProxyHandler({}))
         try:
-            with urllib.request.build_opener(*handlers).open(request,timeout=self.timeout) as response:
+            request_timeout = self.timeout
+            if provider == "groq" and model == "qwen/qwen3.8-27b" and reasoning_effort in {"medium", "high"}:
+                request_timeout = max(request_timeout, 45)
+            with urllib.request.build_opener(*handlers).open(request,timeout=request_timeout) as response:
                 data = json.loads(response.read(4_000_001).decode("utf-8"))
         except urllib.error.HTTPError as exc:
             code = exc.code
@@ -144,7 +169,8 @@ class LLMClient:
         return text.strip()
 
     def chat_complete(self, system_prompt: str, user_prompt: str, temperature: float = 0.2,
-                      max_tokens: int = 1500, raise_on_error: bool = False) -> str:
+                      max_tokens: int = 1500, raise_on_error: bool = False,
+                      reasoning_effort: str = "none") -> str:
         if not self.is_available():
             if raise_on_error:
                 raise RuntimeError("Model is offline or not configured")
@@ -152,7 +178,7 @@ class LLMClient:
         try:
             if time.monotonic() < self._retry_after:
                 raise RuntimeError("Model unavailable; retrying after a short cooldown")
-            result = self._request(system_prompt,user_prompt,temperature,max_tokens)
+            result = self._request(system_prompt,user_prompt,temperature,max_tokens,reasoning_effort)
             self.last_error = None
             return result
         except Exception as exc:

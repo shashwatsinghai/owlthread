@@ -19,6 +19,7 @@ data={'version':tomllib.loads((root/'pyproject.toml').read_text())['project']['v
       'git_head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),
       'dirty':bool(subprocess.check_output(['git','status','--porcelain'],cwd=root,text=True)),
       'sources':{p.relative_to(root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}}
-output=root/'artifacts/audit-2026-09-14/build-provenance.json'
+output=root/'artifacts/build-provenance.json'
+output.parent.mkdir(parents=True,exist_ok=True)
 output.write_text(json.dumps(data,indent=2)+'\n')
 print(f'Verified generated scripts; recorded {len(data["sources"])} input hashes.')

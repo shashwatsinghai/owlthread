@@ -50,7 +50,8 @@ class MemoryExtractor:
             return []
         if self.llm_client.is_available():
             data=json.loads(self.llm_client.chat_complete(system_prompt=self.active_system_prompt,
-                user_prompt=json.dumps({"capture":raw_text}),raise_on_error=True))
+                user_prompt=json.dumps({"capture":raw_text}),raise_on_error=True,
+                **self.llm_client.memory_generation_options(1500)))
             return validate_actions(data,raw_text,[])
         return self.heuristic_extract(raw_text)
 

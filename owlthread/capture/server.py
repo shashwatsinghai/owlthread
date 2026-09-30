@@ -17,7 +17,7 @@ from owlthread.db.database import Database, get_iso_now
 from owlthread.extraction.pipeline import ExtractionPipeline
 from owlthread.primer.engine import PrimerEngine
 from owlthread.context_awareness import PageIntelligence
-from owlthread.security import local_token, EXTENSION_ORIGIN, MAX_CAPTURE, web_url, project_name
+from owlthread.security import local_token, paired_origin_count, EXTENSION_ORIGIN, MAX_CAPTURE, web_url, project_name
 from owlthread.site_policy import is_hard_blocked_url
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,10 @@ class CaptureRequestHandler(BaseHTTPRequestHandler):
             elif url.path in {"/","/status","/state"}:
                 status = self.server.status_callback() if self.server.status_callback else {}
                 self._send(200,{"status":"healthy","app":"OwlThread",**status,
-                               "total_entries":self.server.db.count_entries(),"pending_captures":self.server.db.pending_count()})
+                               "total_entries":self.server.db.count_entries(),"pending_captures":self.server.db.pending_count(),
+                               "capture_transfer":self.server.db.capture_status(),
+                               "active_project":self.server.db.get_setting("active_project","General"),
+                               "authorized_browser_count":paired_origin_count(self.server.db)})
             elif url.path == "/entries":
                 quadrant = query.get("quadrant",[None])[0]
                 if quadrant is not None and quadrant not in VALID_QUADRANTS:
@@ -236,7 +239,7 @@ class CaptureRequestHandler(BaseHTTPRequestHandler):
                         self._send(200,{"status":"skipped","accepted":False,**assessment})
                         return
                 cid = self.server.db.insert_capture(text,source,pid,metadata,dedup_key=dedup)
-                for callback in self.server.capture_callbacks:
+                for callback in self.server.capture_callbacks if cid else []:
                     try:
                         callback({"id":cid,"raw_text":text,"source_app":source,"project_id":pid})
                     except Exception:

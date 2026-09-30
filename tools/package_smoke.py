@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
@@ -18,7 +19,14 @@ async def mcp_check(exe: Path, database: Path) -> None:
     async with stdio_client(parameters) as (read,write):
         async with ClientSession(read,write) as session:
             await session.initialize()
-            assert len((await session.list_tools()).tools)==8
+            tools = {tool.name for tool in (await session.list_tools()).tools}
+            assert tools == {"search_memory","record_decision","get_quadrant","generate_primer",
+                "get_memory_stats","list_integrations","get_integration_status","configure_integration",
+                "test_integration_connection","sync_integration_context"},tools
+            available = await session.call_tool("get_integration_status",{"integration_id":"cloudflare"})
+            assert not available.isError,available
+            snapshot = json.loads(available.content[0].text)
+            assert snapshot["builtin"] and not snapshot["connected"],snapshot
             result = await session.call_tool("record_decision",{
                 "summary":"Keep local SQLite backups before schema upgrades",
                 "quadrant":"settled_decisions"})
@@ -30,7 +38,9 @@ async def mcp_check(exe: Path, database: Path) -> None:
 
 
 def main() -> None:
-    exe = Path(sys.argv[1] if len(sys.argv)>1 else "artifacts/dist/OwlThread/owlthread-cli.exe").resolve()
+    root=Path(__file__).resolve().parent.parent
+    version=tomllib.loads((root/'pyproject.toml').read_text())['project']['version']
+    exe = Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'artifacts/dist'/version/'OwlThread/owlthread-cli.exe'
     assert exe.is_file(),exe
     with tempfile.TemporaryDirectory(prefix="owlthread-package-") as directory:
         database = Path(directory)/"smoke.db"

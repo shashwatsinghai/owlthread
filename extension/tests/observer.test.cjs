@@ -132,3 +132,48 @@ test("hard-blocked pages install no observer or message listener",async()=>{
   assert.equal(f.changes.length,0);
   f.dom.window.close();
 });
+
+test("a first ChatGPT turn survives its new conversation URL being assigned",async()=>{
+  const f=fixture("chatgpt.com");
+  f.window.history.replaceState({},"","/");
+  await sleep(25);
+  sendPrompt(f,"Create the first decision");
+  await sleep(25);
+  f.window.history.pushState({},"","/c/new-conversation");
+  f.window.document.body.insertAdjacentHTML("beforeend",'<article><div data-message-author-role="assistant" data-is-streaming="false">First answer is complete.</div></article>');
+  await sleep(1700);
+  const completed=f.messages.find(x=>x.type==="turn_complete");
+  assert.ok(completed,"assigning a URL must not discard a sent turn");
+  assert.equal(completed.payload.url,"https://chatgpt.com/c/new-conversation");
+  f.dom.window.close();
+});
+
+test("switching between existing chats never attaches an unrelated reply to the staged prompt",async()=>{
+  const f=fixture("chatgpt.com");
+  await sleep(25);sendPrompt(f,"Prompt in the first chat");
+  f.window.history.pushState({},"","/c/unrelated-chat");
+  f.window.document.body.insertAdjacentHTML("beforeend",'<article><div data-message-author-role="assistant" data-is-streaming="false">An unrelated chat reply.</div></article>');
+  await sleep(1700);
+  assert.equal(f.messages.some(x=>x.type==="turn_complete"),false);
+  f.dom.window.close();
+});
+
+test("a delayed acknowledgement from one turn cannot clear a newer staged turn",async()=>{
+  const f=fixture("chatgpt.com");
+  const original=f.window.chrome.runtime.sendMessage;
+  let release;
+  f.window.chrome.runtime.sendMessage=async message=>{
+    const result=await original(message);
+    if(message.type==="turn_complete" && !release) await new Promise(resolve=>{release=resolve;});
+    return result;
+  };
+  await completeReply(f,'<article><div data-message-author-role="assistant" data-is-streaming="false">First completed reply.</div></article>',"First user request");
+  assert.equal(typeof release,"function");
+  sendPrompt(f,"Second user request");await sleep(25);release();
+  f.window.document.body.insertAdjacentHTML("beforeend",'<article><div data-message-author-role="assistant" data-is-streaming="false">Second completed reply.</div></article>');
+  await sleep(1700);
+  const completed=f.messages.filter(x=>x.type==="turn_complete");
+  assert.equal(completed.length,2);
+  assert.equal(completed[1].payload.assistant_text,"Second completed reply.");
+  f.dom.window.close();
+});

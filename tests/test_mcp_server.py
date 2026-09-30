@@ -25,7 +25,8 @@ class TestMCPServer(unittest.TestCase):
         tools = asyncio.run(mcp.list_tools())
         self.assertEqual({tool.name for tool in tools},
                          {"search_memory","record_decision","get_quadrant","generate_primer","get_memory_stats",
-                          "list_integrations","get_integration_status","configure_integration"})
+                          "list_integrations","get_integration_status","configure_integration",
+                          "test_integration_connection","sync_integration_context"})
 
     def test_integration_tools_are_catalog_only_and_permission_scoped(self) -> None:
         available = list_integrations()

@@ -16,14 +16,29 @@ class Animator:
     def _animate(widget: tk.Misc, duration_ms: int, step: Callable[[float],None],
                  callback: Callable[[],None] | None = None) -> None:
         start = time.monotonic()
+        if not hasattr(widget,"_owlthread_animation_ids"):
+            widget._owlthread_animation_ids = set()
+            def cancel(event: tk.Event) -> None:
+                if event.widget is widget:
+                    for task in list(widget._owlthread_animation_ids):
+                        try: widget.after_cancel(task)
+                        except tk.TclError: pass
+                    widget._owlthread_animation_ids.clear()
+            widget.bind("<Destroy>",cancel,add="+")
+        scheduled: str | None = None
         def tick() -> None:
+            nonlocal scheduled
+            if scheduled:
+                widget._owlthread_animation_ids.discard(scheduled)
+                scheduled=None
             try:
                 if not widget.winfo_exists():
                     return
                 progress = min(1,(time.monotonic()-start)*1000/max(1,duration_ms))
                 step(Animator.ease_in_out(progress))
                 if progress<1:
-                    widget.after(16,tick)
+                    scheduled=widget.after(16,tick)
+                    widget._owlthread_animation_ids.add(scheduled)
                 elif callback:
                     callback()
             except tk.TclError:

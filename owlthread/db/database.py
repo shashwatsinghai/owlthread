@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
 from owlthread.config import DB_PATH, VALID_QUADRANTS
-from owlthread.security import SECRET_SETTINGS, protect, unprotect, project_name, MAX_CAPTURE
+from owlthread.security import is_secret_setting, protect, unprotect, project_name, MAX_CAPTURE
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -210,10 +210,11 @@ class DatabaseManager:
             conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
         if not capture_fts_exists:
             conn.execute("INSERT INTO capture_fts(capture_fts) VALUES('rebuild')")
-        for key in SECRET_SETTINGS:
-            row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-            if row and row[0]:
-                conn.execute("UPDATE settings SET value=? WHERE key=?", (protect(row[0]), key))
+        for row in conn.execute("SELECT key,value FROM settings").fetchall():
+            if is_secret_setting(row["key"]) and row["value"]:
+                protected = protect(row["value"])
+                if protected != row["value"]:
+                    conn.execute("UPDATE settings SET value=?,updated_at=? WHERE key=?", (protected,get_iso_now(),row["key"]))
         conn.execute("PRAGMA user_version=4")
         conn.commit()
 
@@ -437,13 +438,31 @@ class DatabaseManager:
     def pending_count(self) -> int:
         return self.execute_read("SELECT COUNT(*) AS n FROM capture_buffer WHERE processed=0")[0]["n"]
 
+    def capture_status(self, project_id: int | None = None) -> dict[str, Any]:
+        """Receive and extraction metadata from one SQLite snapshot, without text."""
+        if project_id is not None and (type(project_id) is not int or project_id <= 0):
+            raise ValueError("Invalid project_id")
+        where = "WHERE project_id=?" if project_id is not None else ""
+        return self.execute_read(f"""WITH captures AS (
+                SELECT id,captured_at,source_app,processed,extraction_status FROM capture_buffer {where})
+            SELECT COUNT(*) AS total_captures,
+                COALESCE(SUM(processed=0),0) AS pending_captures,
+                COALESCE(SUM(processed=0 AND extraction_status='failed'),0) AS failed_captures,
+                COALESCE(SUM(source_app='browser_extension'),0) AS browser_captures,
+                COALESCE(SUM(source_app='browser_extension' AND processed=0),0) AS browser_pending,
+                (SELECT id FROM captures ORDER BY id DESC LIMIT 1) AS last_capture_id,
+                (SELECT captured_at FROM captures ORDER BY id DESC LIMIT 1) AS last_capture_at,
+                (SELECT source_app FROM captures ORDER BY id DESC LIMIT 1) AS last_capture_source,
+                (SELECT captured_at FROM captures WHERE source_app='browser_extension' ORDER BY id DESC LIMIT 1) AS last_browser_capture_at
+            FROM captures""", (project_id,) if project_id is not None else ())[0]
+
     def get_setting(self, key: str, default: Any = None) -> Any:
         rows = self.execute_read("SELECT value FROM settings WHERE key=?", (key,))
         value = rows[0]["value"] if rows else default
         return self._setting_value(key,value)
 
     def _setting_value(self, key: str, value: Any) -> Any:
-        if key not in SECRET_SETTINGS or not value:
+        if not is_secret_setting(key) or not value:
             return value
         try:
             decoded = unprotect(value)
@@ -456,7 +475,7 @@ class DatabaseManager:
         return decoded
 
     def set_setting(self, key: str, value: str) -> None:
-        if key in SECRET_SETTINGS:
+        if is_secret_setting(key):
             value = protect(value)
         self.execute_write("""INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",(key,value,get_iso_now()))
@@ -464,7 +483,8 @@ class DatabaseManager:
 
     def get_all_settings(self) -> dict[str,str]:
         return {r["key"]:self._setting_value(r["key"],r["value"])
-                for r in self.execute_read("SELECT key,value FROM settings")}
+                for r in self.execute_read("SELECT key,value FROM settings")
+                if not r["key"].startswith("integration_credential:")}
 
     def delete_setting(self, key: str) -> bool:
         deleted = self.execute_write(lambda conn: conn.execute("DELETE FROM settings WHERE key=?",(key,)).rowcount > 0)

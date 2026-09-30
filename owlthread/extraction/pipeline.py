@@ -65,7 +65,8 @@ class ExtractionPipeline:
                     system_prompt=self.db.get_setting("extraction_prompt") or EXTRACTION_PROMPT,
                     user_prompt=json.dumps({"capture":text,"existing_memories":[
                         {"id":e["id"],"quadrant":e["quadrant"],"summary":e["summary"]} for e in existing]},ensure_ascii=False),
-                    max_tokens=1800, temperature=0.1, raise_on_error=True)
+                    temperature=0.1, raise_on_error=True,
+                    **self.llm_client.memory_generation_options(1800))
                 actions=validate_actions(json.loads(response),text,existing)
                 for item in actions:
                     if item["quadrant"]=="settled_decisions" and not any(

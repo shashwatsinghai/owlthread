@@ -17,6 +17,18 @@ namespace OwlPolicy {
     try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) && !parsed.username && !parsed.password ? normalizeHost(parsed.hostname) : ""; }
     catch { return ""; }
   }
+  /** AI apps assign a new chat URL after the first send without changing the page. */
+  export function newConversationTransition(from:string,to:string):boolean {
+    try {
+      const before=new URL(from),after=new URL(to);
+      if(before.origin!==after.origin || before.username || before.password || after.username || after.password) return false;
+      const hostname=normalizeHost(before.hostname);
+      if(["chatgpt.com","chat.openai.com"].includes(hostname)) return /^\/$/.test(before.pathname) && /^\/c\/[A-Za-z0-9_-]+\/?$/.test(after.pathname);
+      if(hostname==="claude.ai") return /^\/(?:new)?\/?$/.test(before.pathname) && /^\/chat\/[A-Za-z0-9_-]+\/?$/.test(after.pathname);
+      if(hostname==="chat.deepseek.com") return /^\/$/.test(before.pathname) && /^\/a\/chat\/s\/[A-Za-z0-9_-]+\/?$/.test(after.pathname);
+      return false;
+    } catch {return false;}
+  }
   export function key(hostname: string): string { return "siteMode:" + hostname; }
   export function hardBlocked(hostname: string): boolean {
     const clean = normalizeHost(hostname);

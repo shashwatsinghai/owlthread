@@ -1,6 +1,7 @@
 """Expandable memory card with clear source and history actions."""
 from __future__ import annotations
 import logging
+import json
 import tkinter as tk
 from datetime import datetime,timezone
 from typing import Any,Callable
@@ -83,3 +84,65 @@ class FeedCard(tk.Frame):
 
 
 MemoryFeedCard = FeedCard
+
+
+class CaptureCard(tk.Frame):
+    """Raw receipt with an explicit extraction state and selectable original text."""
+
+    def __init__(self, master: tk.Misc, capture: dict[str,Any], **kwargs: Any) -> None:
+        super().__init__(master,bg=CARD,padx=16,pady=12,highlightthickness=1,highlightbackground="#30314a",**kwargs)
+        self.capture=capture
+        self.expanded=False
+        processed=bool(capture.get("processed"))
+        status="Extracted" if processed else {
+            "pending":"Waiting to extract", "failed":"Extraction failed",
+            "retry":"Waiting to retry", "partial":"Partly extracted",
+        }.get(capture.get("extraction_status"),str(capture.get("extraction_status") or "Waiting to extract").replace("_"," ").title())
+        color="#62d6ad" if processed else "#f59e0b" if capture.get("extraction_status")=="failed" else "#a7a1ff"
+        source=str(capture.get("source_app") or "manual").replace("_"," ")
+        heading=tk.Frame(self,bg=CARD)
+        heading.pack(fill="x")
+        tk.Label(heading,text=f"RAW CAPTURE · {status}",bg=CARD,fg=color,font=("Segoe UI",9,"bold"),anchor="w").pack(side="left")
+        tk.Label(heading,text=_relative_time(capture.get("captured_at") or ""),bg=CARD,fg=MUTED,font=("Segoe UI",9)).pack(side="right")
+        raw=capture.get("raw_text") or ""
+        preview=" ".join(raw.split())
+        if len(preview)>220: preview=preview[:217]+"…"
+        self.preview=tk.Label(self,text=preview,bg=CARD,fg=TEXT,justify="left",anchor="w",wraplength=780,font=("Segoe UI",11))
+        self.preview.pack(fill="x",pady=(8,6))
+        metadata=f"{source} · #{capture['id']} · {len(raw):,} characters"
+        if capture.get("attempts"): metadata+=f" · {capture['attempts']} extraction attempts"
+        self.meta=tk.Label(self,text=metadata,bg=CARD,fg=MUTED,anchor="w",font=("Segoe UI",9))
+        self.meta.pack(fill="x")
+        try:
+            source_metadata=json.loads(capture.get("source_metadata") or "{}")
+        except (ValueError,TypeError):
+            source_metadata={}
+        if isinstance(source_metadata,dict):
+            source_details="\n".join(str(source_metadata.get(key) or "") for key in ("title","url") if source_metadata.get(key))
+            if source_details:
+                self.source_details=tk.Label(self,text=source_details,bg=CARD,fg=MUTED,anchor="w",justify="left",font=("Segoe UI",9),wraplength=780)
+                self.source_details.pack(fill="x",pady=(6,0))
+        reason=capture.get("extraction_reason")
+        if reason and not processed:
+            self.reason=tk.Label(self,text=str(reason),bg=CARD,fg="#f59e0b",anchor="w",justify="left",font=("Segoe UI",9),wraplength=780)
+            self.reason.pack(fill="x",pady=(6,0))
+        self.toggle_button=tk.Button(self,text="Show original text",command=self.toggle,bg="#30304b",fg=TEXT,
+                                     activebackground="#41415f",activeforeground=TEXT,relief="flat",font=("Segoe UI",9),padx=10,pady=5,cursor="hand2")
+        self.toggle_button.pack(anchor="w",pady=(8,0))
+        self.detail=tk.Text(self,bg="#19192d",fg=TEXT,wrap="word",height=8,relief="flat",font=("Consolas",10),padx=12,pady=12)
+        self.detail.insert("1.0",raw)
+        self.detail.configure(state="disabled")
+        self.bind("<Configure>",self._resize)
+
+    def _resize(self, event: tk.Event) -> None:
+        self.preview.configure(wraplength=max(160,event.width-34))
+        if hasattr(self,"reason"): self.reason.configure(wraplength=max(160,event.width-34))
+        if hasattr(self,"source_details"): self.source_details.configure(wraplength=max(160,event.width-34))
+
+    def toggle(self) -> None:
+        self.expanded=not self.expanded
+        self.toggle_button.configure(text="Hide original text" if self.expanded else "Show original text")
+        if self.expanded:
+            self.detail.pack(fill="x",pady=(10,0))
+        else:
+            self.detail.pack_forget()

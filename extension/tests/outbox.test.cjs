@@ -8,11 +8,12 @@ const source = readFileSync("background.js","utf8");
 function worker(store = {}) {
   let receive;
   const sent = [];
+  const events = {};
   store.localApiToken ||= "t".repeat(43);
-  const state = {online:false, failStorage:false, fetchHook:null};
+  const state = {online:false, failStorage:false, fetchHook:null, responseStatus:200};
   const clone = structuredClone;
   const chrome = {
-    runtime: {id:"test-extension",getURL:path=>"chrome-extension://test-extension/"+path, onMessage:{addListener(fn){receive=fn;}},onInstalled:{addListener(){}},onStartup:{addListener(){}}},
+    runtime: {id:"test-extension",getURL:path=>"chrome-extension://test-extension/"+path, onMessage:{addListener(fn){receive=fn;}},onInstalled:{addListener(fn){events.install=fn;}},onStartup:{addListener(fn){events.startup=fn;}}},
     commands: {onCommand:{addListener(){}}},
     alarms: {onAlarm:{addListener(){}},create:async()=>{}},
     action: {setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}},
@@ -27,18 +28,53 @@ function worker(store = {}) {
   };
   const context = vm.createContext({
     chrome,crypto:webcrypto,TextEncoder,Uint8Array,AbortSignal,URL,
+    setTimeout:(...args)=>{const timer=setTimeout(...args);timer.unref();return timer;},clearTimeout,
     importScripts: file => vm.runInContext(readFileSync(file,"utf8"),context),
     fetch:async (url,options)=>{
       if(!state.online) throw new Error("Desktop offline");
       if(state.fetchHook) await state.fetchHook(url,options);
       sent.push({url,headers:options.headers,body:options.body ? JSON.parse(options.body) : null});
-      return {ok:true,json:async()=>url.endsWith("/capture-smart") ? {status:"skipped",accepted:false,reason:"No durable signal"} : {status:"healthy",total_entries:0,model_ready:true}};
+      return {ok:state.responseStatus===200,status:state.responseStatus,json:async()=>state.responseStatus!==200 ? {error:"Pair this client in OwlThread Settings"} : url.endsWith("/capture-smart") ? {status:"skipped",accepted:false,reason:"No durable signal"} : {status:"healthy",total_entries:0,model_ready:true}};
     }
   });
   vm.runInContext(source,context);
   const message = value=>new Promise(resolve=>receive(value,{id:chrome.runtime.id,url:chrome.runtime.getURL("popup/popup.html")},resolve));
-  return {store,state,sent,message};
+  return {store,state,sent,message,events};
 }
+
+const tick = () => new Promise(resolve=>setTimeout(resolve,20));
+
+test("pairing an open desktop automatically drains notes already saved offline",async()=>{
+  const f=worker({localApiToken:""});
+  f.store.localApiToken="";
+  await f.message({type:"capture",payload:{text:"Saved before pairing",url:"https://example.com/one"}});
+  await f.message({type:"retry"});
+  f.state.online=true;
+  assert.equal((await f.message({type:"pair",token:"p".repeat(43)})).ok,true);
+  await tick();
+  assert.equal(f.store.outbox.length,0);
+  assert.equal(f.sent.find(x=>x.url.endsWith("/capture")).body.text,"Saved before pairing");
+});
+
+test("successful connection checks resume the durable queue without a reconnect click",async()=>{
+  const f=worker();
+  await f.message({type:"capture",payload:{text:"Saved while desktop closed"}});
+  await f.message({type:"retry"});
+  f.state.online=true;
+  assert.equal((await f.message({type:"health"})).ok,true);
+  await tick();
+  assert.equal(f.store.outbox.length,0);
+});
+
+test("health distinguishes missing pairing from rejected credentials and a closed desktop",async()=>{
+  const f=worker();
+  f.store.localApiToken="";
+  assert.equal((await f.message({type:"health"})).connection,"unpaired");
+  f.store.localApiToken="t".repeat(43);
+  assert.equal((await f.message({type:"health"})).connection,"offline");
+  f.state.online=true;f.state.responseStatus=401;
+  assert.equal((await f.message({type:"health"})).connection,"pairing_required");
+});
 
 test("outbox survives worker restart and retry retains the idempotency key",async()=>{
   const first=worker();
@@ -150,8 +186,8 @@ test("a slow sync never delays saving a new manual note or overwrites it",async(
     assert.equal(f.store.outbox.length,2);
   } finally {release();}
   await syncing;
-  assert.equal(f.store.outbox.length,1);
-  assert.equal(f.store.outbox[0].payload.text,"Second note");
+  assert.equal(f.store.outbox.length,0,"a capture added during delivery must drain in the same sync");
+  assert.equal(f.sent.filter(x=>x.url.endsWith("/capture")).length,2);
 });
 
 test("offline retry and extraction report failure without losing notes",async()=>{
@@ -193,4 +229,14 @@ test("a sent prompt is staged before the reply and completed into one durable tu
   assert.equal(completed.ok,true);
   assert.equal(f.store.outbox[0].state,"ready");
   assert.match(f.store.outbox[0].payload.text,/Assistant:\nUse signed webhooks/);
+});
+
+test("a completed first turn keeps its assigned chat URL without allowing arbitrary URL changes",async()=>{
+  const f=worker();
+  const first=await f.message({type:"turn_stage",payload:{user_text:"First prompt",turn_key:"first",url:"https://chatgpt.com/"}});
+  await f.message({type:"turn_complete",payload:{stage_id:first.stage_id,assistant_text:"First reply",url:"https://chatgpt.com/c/first",conversation_id:"chatgpt:first"}});
+  assert.equal(f.store.outbox[0].payload.url,"https://chatgpt.com/c/first");
+  const second=await f.message({type:"turn_stage",payload:{user_text:"Second prompt",turn_key:"second",url:"https://chatgpt.com/c/second"}});
+  await f.message({type:"turn_complete",payload:{stage_id:second.stage_id,assistant_text:"Second reply",url:"https://youtube.com/watch"}});
+  assert.equal(f.store.outbox.find(x=>x.id===second.stage_id).payload.url,"https://chatgpt.com/c/second");
 });

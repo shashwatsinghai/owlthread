@@ -14,6 +14,7 @@ except (ImportError, ModuleNotFoundError):
 from owlthread.config import VALID_QUADRANTS
 from owlthread.db.database import DatabaseManager, get_iso_now
 from owlthread.integrations.registry import IntegrationRegistry
+from owlthread.integrations.context import ContextConnectorService
 from owlthread.primer.engine import PrimerEngine
 from owlthread.primer.search import MemorySearcher
 from owlthread.extraction.rebase import apply_actions, normalized
@@ -140,6 +141,27 @@ def configure_integration(integration_id: str, enabled: bool, scopes: list[str],
     """Configure non-secret integration grants; powerful scopes cannot be granted over MCP."""
     return IntegrationRegistry(get_active_db()).configure(
         integration_id,enabled=enabled,scopes=scopes,project_id=project_id,via_mcp=True)
+
+
+@mcp.tool()
+def test_integration_connection(integration_id: str) -> dict[str, Any]:
+    """Test a locally configured bundled connector with authenticated, read-only provider calls.
+
+    Set its token and resource IDs in the desktop Connect screen first. This does
+    not import context. Connectivity is reported only after a provider response.
+    """
+    return ContextConnectorService(get_active_db()).test(integration_id)
+
+
+@mcp.tool()
+def sync_integration_context(integration_id: str, limit: int = 25) -> dict[str, Any]:
+    """Read bounded provider context into the connector's configured local project.
+
+    Cloudflare and GitHub clients are bundled. Only exact granted read scopes are
+    fetched; repeated unchanged snapshots are deduplicated. Provider writes and
+    deployment are unavailable. Limit is 1 to 100 records per selected scope.
+    """
+    return ContextConnectorService(get_active_db()).sync(integration_id, limit)
 
 
 @mcp.resource("owlthread://quadrants/{quadrant}")

@@ -74,6 +74,7 @@ class LowTokenLargeMemory(unittest.TestCase):
         llm=MagicMock(spec=LLMClient)
         llm.provider="openai"
         llm.model="small-test-model"
+        llm.memory_generation_options.return_value={"max_tokens":1500}
         llm.is_available.return_value=True
         llm.chat_complete.return_value=f"# Context Primer\n\nSQLite WAL is recorded [#{first}]."
         one=PrimerEngine(self.db,llm).generate_primer(
@@ -89,6 +90,11 @@ class LowTokenLargeMemory(unittest.TestCase):
             "I am going to build the SQLite billing engine",project_id=self.pid,auto_copy=False)
         self.assertFalse(three.diagnostics["cache_hit"])
         self.assertEqual(llm.chat_complete.call_count,2)
+        llm.memory_generation_options.return_value={"max_tokens":4096,"reasoning_effort":"medium"}
+        four=PrimerEngine(self.db,llm).generate_primer(
+            "I am going to build the SQLite billing engine",project_id=self.pid,auto_copy=False)
+        self.assertFalse(four.diagnostics["cache_hit"])
+        self.assertEqual(llm.chat_complete.call_count,3)
 
     def test_auto_copy_false_never_touches_clipboard(self) -> None:
         self.db.insert_entry("Build API with FastAPI",project_id=self.pid)

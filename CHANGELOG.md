@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.6.0 — 2026-09-30 (local release candidate)
+
+- Resume browser transfers immediately after pairing, worker startup and connection recovery; drain captures queued during an in-flight sync and retain durable retries.
+- Distinguish offline, unpaired, revoked and paused states; show destination project, last transfer and an explicit desktop-project choice.
+- Preserve staged AI turns across the new-conversation URL transition.
+- Show raw received captures and browser receipt status before extraction, with project-scoped counts and responsive desktop refresh.
+- Bundle read-only Cloudflare and GitHub context clients with protected Windows credentials, explicit scopes/resources, connection tests, bounded idempotent imports and two MCP context tools.
+- Refresh the Windows portable build and extension package from the same verified production inputs.
+
 - Replace selection-only browser capture with no-selection current-turn/page capture.
 - Stage new ChatGPT, Claude and DeepSeek user prompts durably at send time; merge completed replies under the same idempotency key and retain offline work.
 - Enforce 22 immutable blocked domains at manifest, content, worker queue and desktop API boundaries; enable strict site isolation so origin-blind clipboard monitoring stays off by default.

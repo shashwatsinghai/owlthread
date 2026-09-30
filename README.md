@@ -1,4 +1,4 @@
-# OwlThread 1.5.0
+# OwlThread 1.6.0
 
 **State your task, get context.** OwlThread keeps project memory on your computer and produces a cited Markdown brief for the task you describe. The desktop, command line, browser companion and MCP tools share one SQLite database.
 
@@ -17,13 +17,13 @@ This is a release candidate. See [verification](docs/VERIFICATION.md) for measur
 | Git metadata and selected diffs | Implemented explicit opt-in command; temporary real Git repositories tested |
 | Provider adapters | Request/error fixtures tested; no paid-provider credential test or local Ollama model run in this audit |
 | MCP | Real stdio client/server and packaged executable smoke tests; see verification for exact results |
-| 29-service integration catalog and permission grants | Implemented as disabled/unconnected definitions; live provider clients and OAuth are not falsely claimed |
+| Built-in Cloudflare/GitHub context clients and 29-service catalog | Cloudflare/GitHub read-only clients are bundled; explicit token/resource setup, test and context import are required. Other services remain catalog definitions |
 | Cloud sync, semantic embeddings, generic browser history, background Git watching | Not implemented |
 | Firefox/Safari extension, signed installer, macOS/Linux native desktop release | Unsupported in this release |
 
 ## Install on Windows
 
-Release files are under `artifacts/release/1.5.0/`. Extract `OwlThread-Windows-1.5.0.zip` into a new folder. Keep the complete folder together. Use **Open OwlThread.bat** for the desktop or **Start tray.bat** for the background app. `owlthread-cli.exe --version` reports the version. No separate Python is required for the portable build. The binaries are unsigned.
+Release files are under `artifacts/release/1.6.0/`. Extract `OwlThread-Windows-1.6.0.zip` into a new folder. Keep the complete folder together. Use **Open OwlThread.bat** for the desktop or **Start tray.bat** for the background app. `owlthread-cli.exe --version` reports the version. No separate Python is required for the portable build. The binaries are unsigned.
 
 From source, use Python 3.11+ with Tk support (this audit used Windows Python 3.14):
 
@@ -40,15 +40,19 @@ For the exact Windows build environment, install `requirements-windows.lock` bef
 ## First use and privacy choices
 
 1. Open desktop Settings. Leave provider **Fallback** for entirely local rule-based extraction and brief assembly. Existing provider environment variables are also supported; inspect them if source launches unexpectedly select a provider.
+
+   For Groq, select **Groq**, use `qwen/qwen3.8-27b`, and enter your key in Settings. Source launches also recognize `GROQ_API_KEY`. Durable memory extraction (including UPDATE/SUPERSEDE decisions) and context primers use **medium reasoning**: these tasks must distinguish commitments from suggestions, reconcile existing facts and connect relevant evidence. Their shared reasoning-and-answer budget is 4,096 tokens; briefs still must fit 500 words. Simple intent classification, page summaries and the legacy importance gate disable reasoning. Reasoning stays separate from saved text, and the primer cache includes generation settings. This is a workload-based default, not a measured claim that medium always outperforms low. The adapter collects complete responses before JSON validation. Keys remain in the desktop's protected settings, never the browser extension or source code.
 2. **Strict site isolation is on by default.** It disables clipboard monitoring even if an older setting enabled it, because clipboard text has no trustworthy source website. Turn strict isolation off only if you knowingly prefer origin-blind clipboard capture. IDE monitoring remains opt-in. Restart after source changes.
 3. Select or create a project in the desktop header. Capture a note such as `Decision: Use SQLite WAL for durable local writes.` Choose extraction, or run `owlthread done`.
 4. Press **Ctrl+Shift+P** while the desktop or tray is running, describe a task, and generate a brief. The result reports whether copying succeeded. Shortcut conflicts may require the tray menu or desktop Primer view.
 
 ## Browser installation and pairing
 
-Extract `OwlThread-Chrome-Brave-1.5.0.zip`, or use the Windows package's `extension` folder. In Chrome/Brave's extensions page, enable Developer mode and choose **Load unpacked** on the folder containing `manifest.json`. Reload the extension and refresh websites after an update.
+Extract `OwlThread-Chrome-Brave-1.6.0.zip`, or use the Windows package's `extension` folder. In Chrome/Brave's extensions page, enable Developer mode and choose **Load unpacked** on the folder containing `manifest.json`. Reload the extension and refresh websites after an update.
 
 In desktop Settings, choose **Copy pairing secret**. Paste it only into the OwlThread popup's **Preferences & connection → Connection settings**, then pair. The secret grants access to local memory; do not paste it into a web page or chat. Choose a capture project in the same popup. Each browser pairs separately with the same desktop at `127.0.0.1:41789`. **Revoke browser connections** rotates the secret and requires all browsers to pair again. A copied secret uses the clipboard, whose history/cloud-sync settings are controlled by Windows.
+
+The popup shows the connection state, pending transfers and destination project. **Use desktop project** changes the destination for new captures; queued captures retain their original project. Pairing, worker startup and connection recovery immediately resume ready items. Retry timers and a durable alarm retain offline work. In the desktop, **Raw captures** shows received text before the extraction timer creates any memories. The browser status strip distinguishes receiving, paused, unpaired and unavailable states.
 
 The 64px owl has cursor-following eyes, blinks, writing and inspecting poses, drag/keyboard positioning and reduced-motion support. **Never on this site** persists until explicitly allowed. In addition, 22 entertainment/social domains are immutable hard blocks: YouTube, youtu.be, Netflix, Prime Video, Disney+, Hotstar, Hulu, Twitch, Spotify, TikTok, Instagram, Facebook, X/Twitter, Reddit, Snapchat, Pinterest, Vimeo, Dailymotion, Kick, SoundCloud and Discord. They cannot be restored with an Allow preference; content scripts do not initialize there, queued legacy items are purged, and the desktop API rejects their URLs.
 
@@ -110,11 +114,11 @@ Point your MCP client's stdio configuration at the extracted console executable,
 {"mcpServers":{"owlthread":{"command":"C:\\Tools\\OwlThread\\owlthread-cli.exe","args":["mcp"]}}}
 ```
 
-Or use the source environment's `python.exe` with arguments `-m`, `owlthread`, `mcp`. Add `--db-path` before `mcp` for a separate store. Memory tools are `search_memory`, `record_decision`, `get_quadrant`, `generate_primer`, and `get_memory_stats`. Catalog tools are `list_integrations`, `get_integration_status`, and `configure_integration`. Explicit recording is a privileged client action. Configure only trusted local clients. stdout carries MCP messages; diagnostics go to stderr. Calling `generate_primer` copies the brief when clipboard access is available.
+Or use the source environment's `python.exe` with arguments `-m`, `owlthread`, `mcp`. Add `--db-path` before `mcp` for a separate store. Memory tools are `search_memory`, `record_decision`, `get_quadrant`, `generate_primer`, and `get_memory_stats`. Integration tools are `list_integrations`, `get_integration_status`, `configure_integration`, `test_integration_connection`, and `sync_integration_context`. Configure Cloudflare/GitHub credentials locally in desktop Connect first; MCP never accepts or returns provider tokens. A context sync saves provider snapshots into the selected project's raw capture store, making them searchable and available to primers. Explicit recording is a privileged client action. Configure only trusted local clients. stdout carries MCP messages; diagnostics go to stderr. Calling `generate_primer` copies the brief when clipboard access is available.
 
 ## Integration catalog and access boundary
 
-The Connect view and MCP catalog expose 29 definitions: Cloudflare, GitHub, Gmail, Google Calendar/Drive, Dropbox, Box, Airtable, Asana, ClickUp, Trello, Figma, Todoist, TickTick, Granola, Fathom, Plaud, Spotify, Apple Music, SciSpace, Consensus, Runway, Apollo.io, Maersk, CoinMarketCap, CoinGecko, Alpaca, Interactive Brokers and Binance. Every definition starts disabled, unconnected and unable to execute. A local grant records exact scopes and an optional OwlThread project; it does not install a provider plugin, create OAuth credentials or claim connectivity. Admin, destructive and trading scopes cannot be granted through OwlThread MCP. Cloudflare is separated into read scopes, DNS/Workers write scopes and blocked account-admin/delete scopes; use a narrowly scoped provider token when a real connector is added.
+The Connect view and MCP catalog expose 29 definitions: Cloudflare, GitHub, Gmail, Google Calendar/Drive, Dropbox, Box, Airtable, Asana, ClickUp, Trello, Figma, Todoist, TickTick, Granola, Fathom, Plaud, Spotify, Apple Music, SciSpace, Consensus, Runway, Apollo.io, Maersk, CoinMarketCap, CoinGecko, Alpaca, Interactive Brokers and Binance. Every definition starts disabled and unconnected. Cloudflare and GitHub have built-in read-only context clients: open Connect, choose the service, enter a token and resource IDs, select exact read scopes, save, test and sync. There is no separate plugin installation. Successful provider checks are cached for 15 minutes and invalidated when credentials or grants change. Other services expose local permission definitions only. Admin, destructive and trading scopes cannot be granted through OwlThread MCP. These built-in clients execute no write/deploy/delete operations, even if the broader catalog defines write scopes. Read [connector setup](docs/CONNECTORS.md) for resources, limits and evidence boundaries.
 
 ## Backup, restore and migration
 
@@ -126,7 +130,8 @@ To uninstall, stop the app, remove the unpacked browser extension and its local 
 
 ## Troubleshooting
 
-- **Desktop offline/unpaired:** start one instance, pair in the popup, and verify port 41789. The browser currently uses this fixed port; alternate desktop ports are for CLI/tests.
+- **Desktop offline/unpaired:** start one instance, pair in the popup, and verify port 41789. Use the popup's connection reason; unpaired and revoked authorization are separate from an offline app. The browser uses this fixed port; alternate desktop ports are for CLI/tests.
+- **Browser saved data seems missing:** check the popup destination project, switch the desktop to that project and open Raw captures. Received text appears before extraction creates memories. Paused capture keeps the browser queue pending. A staged AI prompt waits for its completed reply, or becomes prompt-only after 12 minutes.
 - **Port occupied:** open or quit the existing app. The second instance reports the conflict instead of silently starting another capture service.
 - **Saved model key unavailable:** the desktop opens with an empty model key and asks you to enter it again in Settings. The old encrypted value stays in the database until you save a replacement. If a saved browser token cannot be unlocked, pair the extension again.
 - **No extraction:** inspect pending status, verify the configured provider, or explicitly select Fallback. Speculation, generic explanations and raw code usually produce no memory.

@@ -16,7 +16,7 @@ release=root/'artifacts'/'release'/version
 release.mkdir(parents=True,exist_ok=True)
 dist=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'artifacts'/'dist'/version/'OwlThread'
 assert (dist/'OwlThread.exe').is_file(), 'Build OwlThread.spec first'
-provenance=root/'artifacts'/'audit-2026-09-14'/'build-provenance.json'
+provenance=root/'artifacts'/'build-provenance.json'
 assert provenance.is_file(), 'Record provenance before building'
 built=json.loads(provenance.read_text())
 assert built['version']==version

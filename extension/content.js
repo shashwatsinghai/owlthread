@@ -212,14 +212,21 @@
             if (!this.enabled || !platform || !this.turn)
                 return;
             if (this.page !== location.href || this.turn.page !== location.href) {
-                this.captured.clear();
-                this.armedAt = 0;
-                this.turn = undefined;
-                this.seed();
-                return;
+                if (OwlPolicy.newConversationTransition(this.turn.page, location.href)) {
+                    this.page = location.href;
+                    this.turn.page = location.href;
+                }
+                else {
+                    this.captured.clear();
+                    this.armedAt = 0;
+                    this.turn = undefined;
+                    this.seed();
+                    return;
+                }
             }
             if (!this.armedAt || Date.now() - this.armedAt > 600000)
                 return;
+            const turn = this.turn;
             if (!this.turn.userText) {
                 const newUser = [...document.querySelectorAll(platform.userSelector)]
                     .filter(node => !node.parentElement?.closest(platform.userSelector))
@@ -237,26 +244,28 @@
             const text = nodeText(node);
             if (!text || text.length > 100000)
                 return;
-            const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(this.turn.key + "\0" + text));
+            const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(turn.key + "\0" + text));
             const hash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
-            if (!this.enabled || !this.completed(node) || this.captured.has(hash) || this.pendingHashes.has(hash) || !node.isConnected)
+            if (!this.enabled || this.turn !== turn || !this.completed(node) || this.captured.has(hash) || this.pendingHashes.has(hash) || !node.isConnected)
                 return;
             if (nodeText(node) !== text)
                 return;
-            const stageId = await this.turn.stage;
-            if (!stageId)
+            const stageId = await turn.stage;
+            if (!stageId || this.turn !== turn || !this.enabled || !this.completed(node) || nodeText(node) !== text)
                 return;
             this.pendingHashes.add(hash);
             try {
                 const reply = await chrome.runtime.sendMessage({ type: "turn_complete", payload: {
-                        stage_id: stageId, assistant_text: text, title: document.title, url: this.turn.page
+                        stage_id: stageId, assistant_text: text, title: document.title, url: turn.page, conversation_id: conversationId()
                     } });
                 if (reply?.ok) {
                     this.captured.add(hash);
                     if (this.captured.size > 2000)
                         this.captured.delete(this.captured.values().next().value);
-                    this.armedAt = 0;
-                    this.turn = undefined;
+                    if (this.turn === turn) {
+                        this.armedAt = 0;
+                        this.turn = undefined;
+                    }
                 }
             }
             catch {

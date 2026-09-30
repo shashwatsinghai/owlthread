@@ -25,6 +25,26 @@ var OwlPolicy;
         }
     }
     OwlPolicy.host = host;
+    /** AI apps assign a new chat URL after the first send without changing the page. */
+    function newConversationTransition(from, to) {
+        try {
+            const before = new URL(from), after = new URL(to);
+            if (before.origin !== after.origin || before.username || before.password || after.username || after.password)
+                return false;
+            const hostname = normalizeHost(before.hostname);
+            if (["chatgpt.com", "chat.openai.com"].includes(hostname))
+                return /^\/$/.test(before.pathname) && /^\/c\/[A-Za-z0-9_-]+\/?$/.test(after.pathname);
+            if (hostname === "claude.ai")
+                return /^\/(?:new)?\/?$/.test(before.pathname) && /^\/chat\/[A-Za-z0-9_-]+\/?$/.test(after.pathname);
+            if (hostname === "chat.deepseek.com")
+                return /^\/$/.test(before.pathname) && /^\/a\/chat\/s\/[A-Za-z0-9_-]+\/?$/.test(after.pathname);
+            return false;
+        }
+        catch {
+            return false;
+        }
+    }
+    OwlPolicy.newConversationTransition = newConversationTransition;
     function key(hostname) { return "siteMode:" + hostname; }
     OwlPolicy.key = key;
     function hardBlocked(hostname) {

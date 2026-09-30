@@ -1,5 +1,6 @@
 """Fresh wheel install outside the checkout and wheel rebuild from extracted sdist."""
 import json
+import argparse
 import os
 import subprocess
 import sys
@@ -9,6 +10,9 @@ import tomllib
 import venv
 from pathlib import Path
 root=Path(__file__).resolve().parent.parent
+parser=argparse.ArgumentParser()
+parser.add_argument('--offline-runtime-site',type=Path,help='Reuse this existing pinned site-packages directory instead of downloading dependencies')
+options=parser.parse_args()
 version=tomllib.loads((root/'pyproject.toml').read_text())['project']['version']
 release=root/'artifacts/release'/version
 with tempfile.TemporaryDirectory(prefix='owlthread-python-install-') as temp:
@@ -16,13 +20,21 @@ with tempfile.TemporaryDirectory(prefix='owlthread-python-install-') as temp:
     environment=target/'venv'
     venv.EnvBuilder(with_pip=True).create(environment)
     python=environment/'Scripts/python.exe'
+    if options.offline_runtime_site:
+        runtime_site=options.offline_runtime_site.resolve()
+        assert runtime_site.is_dir(),runtime_site
+        (environment/'Lib/site-packages/verified-runtime.pth').write_text(str(runtime_site)+'\n',encoding='utf-8')
     env=os.environ.copy();env.pop('PYTHONPATH',None);env['OWLTHREAD_LLM_PROVIDER']='fallback'
     def run(*args):
         result=subprocess.run([str(python),*args],cwd=temp,env=env,text=True,capture_output=True,timeout=180)
         if result.returncode:
             raise RuntimeError(f"Fresh Python check failed: {args}\n{result.stdout[-3000:]}\n{result.stderr[-3000:]}")
         return result
-    run('-m','pip','install','-r',str(root/'requirements-windows.lock'),str(release/f'owlthread-{version}-py3-none-any.whl'))
+    wheel=str(release/f'owlthread-{version}-py3-none-any.whl')
+    if options.offline_runtime_site:
+        run('-m','pip','install','--no-index','--no-deps',wheel)
+    else:
+        run('-m','pip','install','-r',str(root/'requirements-windows.lock'),wheel)
     result=run('-c',"import owlthread; from pathlib import Path; import sys; assert Path(owlthread.__file__).is_relative_to(Path(sys.prefix)); print(owlthread.__version__)")
     assert result.stdout.strip()==version
     assert run('-m','owlthread','--version').stdout.strip()=='OwlThread '+version
@@ -37,4 +49,5 @@ with tempfile.TemporaryDirectory(prefix='owlthread-python-install-') as temp:
         assert (source/name).is_file(),name
     run('-m','build','--wheel','--no-isolation','--outdir',str(target/'rebuilt'),str(source))
     assert (target/'rebuilt'/f'owlthread-{version}-py3-none-any.whl').is_file()
-print(json.dumps({'suite':'fresh-python-packages','checks':11,'passed':True,'isolated_import':True,'sdist_rebuild':True}))
+print(json.dumps({'suite':'fresh-python-packages','checks':11,'passed':True,'isolated_import':True,'sdist_rebuild':True,
+                  'dependencies':'reused pinned runtime' if options.offline_runtime_site else 'fresh dependency install'}))

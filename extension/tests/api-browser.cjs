@@ -23,23 +23,51 @@ async function main(){
     await worker.evaluate(base=>{const real=globalThis.fetch;globalThis.fetch=(url,opts)=>real(String(url).replace('http://127.0.0.1:41789',base),opts);},base);
     const popup=await browser.newPage();await popup.goto(`chrome-extension://${id}/popup/popup.html`);
     const send=message=>popup.evaluate(message=>chrome.runtime.sendMessage(message),message);
-    check(!(await send({type:'health'})).ok,'unpaired worker cannot read status');
-    check((await send({type:'pair',token:config.token})).ok,'real extension pairing');
-    check((await send({type:'health'})).ok,'paired authenticated status');
+    const eventually=async(predicate,label)=>{
+      const deadline=Date.now()+10000;
+      while(Date.now()<deadline){if(await predicate()) return;await new Promise(resolve=>setTimeout(resolve,50));}
+      throw Error(label);
+    };
+    const emptyQueue=()=>popup.evaluate(async()=>!(await chrome.storage.local.get({outbox:[]})).outbox.length);
+    check((await send({type:'health'})).connection==='unpaired','unpaired worker reports the pairing requirement');
     await popup.evaluate(()=>chrome.storage.local.set({captureProject:'Browser Alpha'}));
-    check((await send({type:'capture',payload:{text:'Decision: Use SQLite WAL for browser capture durability.',url:'https://example.com/note',capture_mode:'manual'}})).ok,'durable capture acknowledgement');
+    check((await send({type:'capture',payload:{text:'Decision: Use SQLite WAL for browser capture durability.',url:'https://example.com/note',capture_mode:'manual'}})).ok,'capture before pairing is durable offline');
     await popup.evaluate(()=>chrome.storage.local.set({captureProject:'Browser Beta'}));
-    check((await send({type:'retry'})).ok,'real queue drain');
+    check((await send({type:'pair',token:config.token})).ok,'real extension pairing');
+    await eventually(emptyQueue,'offline queue did not drain automatically after pairing');
+    const pairedQueue=await popup.evaluate(()=>chrome.storage.local.get(['outbox','lastError']));
+    check(pairedQueue.outbox.length===0,'pairing automatically drains the offline queue without retry');
+    check((await send({type:'health'})).ok,'paired authenticated status');
     const auth={Authorization:'Bearer '+config.token};
     const json=async url=>(await fetch(base+url,{headers:auth})).json();
     check((await json('/status')).pending_captures===1,'capture persisted in SQLite');
     check((await send({type:'flush'})).total_extracted===1,'real extraction');
     check((await json('/entries?project=Browser%20Alpha')).entries.length===1,'queued capture keeps original project');
     check((await json('/entries?project=Browser%20Beta')).entries.length===0,'new project does not inherit capture');
+    await popup.evaluate(()=>chrome.storage.local.set({captureProject:'Browser Concurrent'}));
+    await worker.evaluate(()=>{
+      const real=globalThis.fetch;globalThis.slowStarted=false;
+      globalThis.releaseCapture=undefined;
+      globalThis.fetch=async(url,options)=>{
+        if(String(url).endsWith('/capture') && !globalThis.slowStarted){
+          globalThis.slowStarted=true;await new Promise(resolve=>{globalThis.releaseCapture=resolve;});
+        }
+        return real(url,options);
+      };
+    });
+    check((await send({type:'capture',payload:{text:'Decision: First concurrent capture stays durable.',url:'https://example.com/concurrent'}})).ok,'first slow capture stored');
+    await eventually(()=>worker.evaluate(()=>globalThis.slowStarted),'slow capture did not start');
+    check(await worker.evaluate(()=>globalThis.slowStarted),'delivery starts before second capture');
+    check((await send({type:'capture',payload:{text:'Decision: Second concurrent capture must not wait for an alarm.',url:'https://example.com/concurrent'}})).ok,'new capture remains responsive during slow delivery');
+    await worker.evaluate(()=>globalThis.releaseCapture());
+    await eventually(emptyQueue,'captures added during delivery did not drain in the same sync');
+    check((await json('/status')).pending_captures===2,'same sync persists both concurrent captures to real SQLite');
+    const delivered=await json('/status');
+    check(delivered.capture_transfer.browser_captures===3,'desktop reports received browser captures before extraction');
     const automatic=await send({type:'capture',payload:{text:'Decision: use a second database for sessions.',url:'https://chatgpt.com/c/fixture',capture_mode:'automatic'}});
     check(automatic.ok===true,'automatic raw capture does not depend on a configured model');
     check((await send({type:'retry'})).ok,'automatic raw capture drains through the durable endpoint');
-    check((await json('/status')).pending_captures===1,'automatic raw capture persisted without model review');
+    check((await json('/status')).pending_captures===3,'automatic raw capture persisted without model review');
     await browser.route('https://example.com/**',route=>route.fulfill({contentType:'text/html',body:'<title>Public note</title><p>Visible project note</p><input value="FORM_SECRET"><textarea>TEXTAREA_SECRET</textarea><div contenteditable>EDIT_SECRET</div><p hidden>HIDDEN_SECRET</p><p style="visibility:hidden">CSS_SECRET</p>'}));
     await page.goto('https://example.com/note');await page.locator('#owlthread-companion').waitFor({state:'attached'});
     const tab=await popup.evaluate(async()=> (await chrome.tabs.query({url:'https://example.com/*'}))[0].id);

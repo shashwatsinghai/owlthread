@@ -39,7 +39,7 @@ class PrimerGenerator:
                 brief = self.llm_client.chat_complete(
                     system_prompt=self.active_system_prompt+"\nUse these headings: "+", ".join(HEADINGS.get(intent_tag,HEADINGS["other"])),
                     user_prompt=self._format_user_prompt(user_request,intent_tag,matched_entries,context_text),
-                    max_tokens=1500,raise_on_error=True)
+                    raise_on_error=True,**self.llm_client.memory_generation_options(1500))
                 memory_ids={str(entry['id']) for entry in matched_entries if entry.get("context_kind","memory")!="capture"}
                 capture_ids={str(entry['id']) for entry in matched_entries if entry.get("context_kind")=="capture"}
                 memory_citations=set(re.findall(r'\[#(\d+)\]',brief))

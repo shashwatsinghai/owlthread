@@ -2,6 +2,13 @@
 (() => {
     importScripts("policy.js");
     const endpoint = "http://127.0.0.1:41789";
+    class DesktopError extends Error {
+        connection;
+        constructor(message, connection) {
+            super(message);
+            this.connection = connection;
+        }
+    }
     // Longer than the content observer's ten-minute completion window.
     const stagedTurnTtlMs = 12 * 60 * 1000;
     const storageReady = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -45,28 +52,47 @@
         const saved = await chrome.storage.local.get({ localApiToken: "" });
         const token = tokenOverride ?? saved.localApiToken;
         if (!token)
-            throw new Error("Pair the extension in Connection settings first.");
-        const response = await fetch(endpoint + path, {
-            method: payload === undefined ? "GET" : "POST",
-            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-            redirect: "error",
-            ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
-            signal: AbortSignal.timeout(path === "/flush" ? 25000 : path === "/context" || path === "/capture-smart" ? 20000 : 5000)
-        });
+            throw new DesktopError("Pair this browser: copy the secret from desktop Settings into Connection settings below.", "unpaired");
+        let response;
+        try {
+            response = await fetch(endpoint + path, {
+                method: payload === undefined ? "GET" : "POST",
+                headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+                redirect: "error",
+                ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+                signal: AbortSignal.timeout(path === "/flush" ? 25000 : path === "/context" || path === "/capture-smart" ? 20000 : 5000)
+            });
+        }
+        catch {
+            throw new DesktopError("Desktop is not reachable. Open OwlThread; saved captures will retry automatically.", "offline");
+        }
         let result;
         try {
             result = await response.json();
         }
         catch {
-            throw new Error(`Desktop returned an unreadable response (${response.status}). Reconnect and try again.`);
+            throw new DesktopError(`Desktop returned an unreadable response (${response.status}). Reopen OwlThread and try again.`, "error");
         }
         if (!result || typeof result !== "object" || Array.isArray(result))
-            throw new Error("Desktop returned an invalid response.");
-        if (!response.ok)
-            throw new Error(result.error || "Local request failed");
+            throw new DesktopError("Desktop returned an invalid response.", "error");
+        if (!response.ok) {
+            if (response.status === 401 || response.status === 403)
+                throw new DesktopError("This browser needs pairing again. Copy the current secret from desktop Settings.", "pairing_required");
+            throw new DesktopError(typeof result.error === "string" ? result.error : "Local request failed", "error");
+        }
         return result;
     }
     let syncing;
+    let syncAgain = false;
+    let retryTimer;
+    let retryDelay = 5000;
+    function retrySoon() {
+        if (retryTimer)
+            return;
+        // MV3 can suspend timers. The persistent one-minute alarm remains the fallback.
+        retryTimer = setTimeout(() => { retryTimer = undefined; void flushQueue().catch(() => undefined); }, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 20000);
+    }
     async function drainQueue() {
         const outbox = await serial(async () => {
             const saved = await chrome.storage.local.get({ outbox: [] });
@@ -91,7 +117,7 @@
                     lastError: original.length !== prepared.length ? "A queued capture from a permanently blocked site was removed." : "" });
             return prepared;
         });
-        let failure = "";
+        let failure = "", retryable = false;
         for (const item of outbox) {
             try {
                 if (item.state === "staged")
@@ -107,28 +133,66 @@
                     failure = "A saved capture is held because its site is blocked. Allow the site to sync it.";
                     continue;
                 }
-                const result = await request("/capture", item.payload);
+                await request("/capture", item.payload);
                 await serial(async () => {
                     const latest = await chrome.storage.local.get({ outbox: [] });
                     // Read again after the network call so new captures cannot be overwritten.
                     const remaining = latest.outbox.filter(candidate => candidate.id !== item.id);
                     await chrome.storage.local.set({ outbox: remaining, lastError: "",
-                        lastCapture: Date.now() });
+                        lastCapture: Date.now(), lastSyncedProject: item.payload.project });
                 });
             }
             catch (error) {
                 failure = error instanceof Error ? error.message : "Start the OwlThread desktop app";
+                retryable = error instanceof DesktopError && error.connection === "offline";
                 break;
             }
         }
         await chrome.storage.local.set({ lastError: failure });
         await updateBadge();
+        if (retryable)
+            retrySoon();
+        else {
+            clearTimeout(retryTimer);
+            retryTimer = undefined;
+            retryDelay = 5000;
+        }
         return failure ? { ok: false, error: failure } : { ok: true };
     }
     function flushQueue() {
-        if (!syncing)
-            syncing = drainQueue().finally(() => { syncing = undefined; });
+        if (syncing) {
+            syncAgain = true;
+            return syncing;
+        }
+        syncing = (async () => {
+            let result;
+            do {
+                syncAgain = false;
+                result = await drainQueue();
+            } while (result.ok && syncAgain);
+            return result;
+        })().finally(() => { syncing = undefined; });
         return syncing;
+    }
+    async function resumeQueue() {
+        // A connection may recover while the previous failed delivery is still settling.
+        if (syncing)
+            await syncing;
+        return flushQueue();
+    }
+    async function desktopStatus() {
+        try {
+            return await request("/status");
+        }
+        catch (error) {
+            // Reauthorize a previously paired extension after app origin permissions reset.
+            // Only a saved secret is used; an unpaired browser never gains access automatically.
+            if (error instanceof DesktopError && ["pairing_required", "offline"].includes(error.connection)) {
+                await request("/pair", {});
+                return request("/status");
+            }
+            throw error;
+        }
     }
     async function updateBadge() {
         const saved = await chrome.storage.local.get({ outbox: [] });
@@ -210,11 +274,16 @@
             return { ok: false, error: "The staged user turn is no longer available." };
         const item = outbox[index];
         await checkSite(item.payload.url || "", true);
+        const completedUrl = typeof payload.url === "string" && OwlPolicy.newConversationTransition(item.payload.url || "", payload.url) ? payload.url : item.payload.url;
+        if (completedUrl !== item.payload.url)
+            await checkSite(completedUrl || "", true);
         const user = item.userText || item.payload.text.replace(/^User:\s*/i, "").trim();
         const text = `User:\n${user}\n\nAssistant:\n${assistant}`;
         if (text.length > 200000)
             return { ok: false, error: "The completed turn is too large to save." };
-        outbox[index] = { ...item, state: "ready", payload: { ...item.payload, text, title: typeof payload.title === "string" ? payload.title.slice(0, 500) : item.payload.title } };
+        outbox[index] = { ...item, state: "ready", payload: { ...item.payload, text, url: completedUrl,
+                conversation_id: completedUrl !== item.payload.url && typeof payload.conversation_id === "string" ? payload.conversation_id.slice(0, 500) : item.payload.conversation_id,
+                title: typeof payload.title === "string" ? payload.title.slice(0, 500) : item.payload.title } };
         await chrome.storage.local.set({ outbox });
         void flushQueue().catch(() => undefined);
         void updateBadge().catch(() => undefined);
@@ -288,13 +357,14 @@
                 respond({ ok: false, error: "Enter the pairing secret copied from desktop Settings." });
                 return;
             }
-            void request("/pair", {}, message.token).then(async () => { await chrome.storage.local.set({ localApiToken: message.token }); respond({ ok: true }); }).catch(() => respond({ ok: false, error: "Pairing failed. Check the secret and desktop connection." }));
+            void request("/pair", {}, message.token).then(async () => { await chrome.storage.local.set({ localApiToken: message.token }); void resumeQueue().catch(() => undefined); respond({ ok: true }); }).catch(error => respond({ ok: false, error: error instanceof Error ? error.message : "Pairing failed. Check the secret and desktop connection." }));
             return true;
         }
         // A status check must not sit behind a slow extraction or offline capture retry.
         if (message.type === "health") {
-            void request("/status").then(result => respond({ ok: true, ...result }))
-                .catch(() => respond({ ok: false, error: "Desktop offline or unpaired. Open OwlThread and check Connection settings." }));
+            void desktopStatus().then(result => { void resumeQueue().catch(() => undefined); respond({ ok: true, ...result, connection: "connected" }); })
+                .catch(error => respond({ ok: false, connection: error instanceof DesktopError ? error.connection : "error",
+                error: error instanceof Error ? error.message : "Could not check the desktop connection." }));
             return true;
         }
         if (message.type === "recent_memories" && (!sender.tab || sender.url?.startsWith(chrome.runtime.getURL("")))) {
@@ -325,7 +395,8 @@
                 return serial(() => stageTurn(payload));
             }
             if (message.type === "turn_complete") {
-                return serial(() => completeTurn(message.payload || {}));
+                const payload = { ...message.payload, ...(!trusted && sender.tab?.url ? { url: sender.tab.url } : {}) };
+                return serial(() => completeTurn(payload));
             }
             if (message.type === "capture") {
                 const payload = { ...message.payload, ...(!trusted && sender.tab?.url ? { url: sender.tab.url } : {}) };
@@ -341,14 +412,11 @@
                 return serial(() => captureTab(sender.tab.id, sender.tab.url || ""));
             }
             if (message.type === "retry") {
-                const result = await flushQueue();
-                if (!result.ok)
-                    return result;
-                await request("/status");
-                return { ok: true };
+                await desktopStatus();
+                return resumeQueue();
             }
             if (message.type === "flush") {
-                const synced = await flushQueue();
+                const synced = await resumeQueue();
                 if (!synced.ok)
                     return synced;
                 const remaining = await chrome.storage.local.get({ outbox: [] });
@@ -372,7 +440,9 @@
         if (alarm.name === "retry-captures")
             void flushQueue().catch(() => undefined);
     });
-    chrome.runtime.onInstalled.addListener(() => { void restoreOpenTabs().catch(() => undefined); });
-    chrome.runtime.onStartup.addListener(() => { void restoreOpenTabs().catch(() => undefined); });
+    chrome.runtime.onInstalled.addListener(() => { void restoreOpenTabs().catch(() => undefined); void flushQueue().catch(() => undefined); });
+    chrome.runtime.onStartup.addListener(() => { void restoreOpenTabs().catch(() => undefined); void flushQueue().catch(() => undefined); });
     void chrome.alarms.create("retry-captures", { periodInMinutes: 1 });
+    // A woken/reloaded service worker must not leave its existing queue waiting for an alarm.
+    void storageReady.then(() => flushQueue()).catch(() => undefined);
 })();

@@ -192,6 +192,7 @@ class PrimerEngine:
         model_key=f"{self.llm_client.provider or 'fallback'}:{self.llm_client.model or ''}"
         matched_revision=hashlib.sha256(json.dumps(revisions,sort_keys=True,default=str).encode()).hexdigest()
         cache_material={"query":cleaned_query.casefold(),"project_id":project_id,"model":model_key,
+                        "generation_options":self.llm_client.memory_generation_options(1500),
                         "matched_revision":matched_revision,"intent":intent,"history":include_history,
                         "prompt":hashlib.sha256(self.generator.active_system_prompt.encode()).hexdigest(),
                         "context":hashlib.sha256((context or {}).get("context_text","").encode()).hexdigest()}

@@ -7,6 +7,10 @@ ROOT=Path(__file__).resolve().parent.parent
 version=tomllib.loads((ROOT/'pyproject.toml').read_text())['project']['version']
 init=ROOT/'owlthread/__init__.py'
 init.write_text(re.sub(r'__version__ = ".*?"',f'__version__ = "{version}"',init.read_text(encoding='utf-8')),encoding='utf-8')
+for name in ('Launch_OwlThread.bat','owlthread.cmd'):
+    file=ROOT/name
+    file.write_bytes(re.sub(r'artifacts\\dist\\\d+\.\d+\.\d+\\',lambda _:f'artifacts\\dist\\{version}\\',
+                           file.read_text(encoding='utf-8')).replace('\n','\r\n').encode('utf-8'))
 for name in ('manifest.json','package.json','package-lock.json'):
     file=ROOT/'extension'/name
     data=json.loads(file.read_text(encoding='utf-8'))

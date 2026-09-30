@@ -37,7 +37,9 @@ class ProcessIntegration(unittest.TestCase):
                     async with ClientSession(read,write) as session:
                         await session.initialize()
                         tools = await session.list_tools()
-                        self.assertEqual(len(tools.tools),8)
+                        self.assertEqual({tool.name for tool in tools.tools},{"search_memory","record_decision",
+                            "get_quadrant","generate_primer","get_memory_stats","list_integrations",
+                            "get_integration_status","configure_integration","test_integration_connection","sync_integration_context"})
                         integrations = await session.call_tool("list_integrations",{})
                         self.assertFalse(getattr(integrations,"isError",getattr(integrations,"is_error",False)))
                         self.assertIn("cloudflare",integrations.content[0].text)

@@ -22,6 +22,7 @@ _CATALOG = (
         scope("zones.read", "Read zone metadata and settings."),
         scope("dns.read", "Read DNS records."),
         scope("workers.read", "Read Worker metadata."),
+        scope("pages.read", "Read Pages project metadata."),
         scope("dns.write", "Create or update DNS records.", "write"),
         scope("workers.deploy", "Create or update Worker deployments.", "write"),
         scope("account.admin", "Change account-wide administration settings.", "admin"),
