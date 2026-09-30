@@ -2,6 +2,7 @@
 (() => {
   if (!/^https?:$/.test(location.protocol) || window.top !== window) return;
   if (OwlPolicy.hardBlocked(OwlPolicy.normalizeHost(location.hostname))) return;
+  if (!OwlPolicy.runtimeAvailable()) return;
   window.dispatchEvent(new Event("owlthread:dispose-companion"));
   document.getElementById("owlthread-companion")?.remove();
 
@@ -130,7 +131,9 @@
   const panel = get<HTMLElement>(".panel");
   const feedback = get<HTMLParagraphElement>(".feedback");
   const auto = get<HTMLInputElement>(".auto");
-  get<HTMLImageElement>(".plush").src = chrome.runtime.getURL("assets/owl-cozy-developer.png");
+  const artwork = OwlPolicy.getURL("assets/owl-cozy-developer.png");
+  if (!artwork) return;
+  get<HTMLImageElement>(".plush").src = artwork;
   document.documentElement.append(host);
 
   const hostname = OwlPolicy.host(location.href);
@@ -186,16 +189,16 @@
   }
   async function send(message: unknown): Promise<any> {
     try {
-      if (!chrome.runtime.id) throw new Error("Extension reloaded");
-      const reply = await chrome.runtime.sendMessage(message);
+      const reply = await OwlPolicy.sendMessage(message);
       return reply || {ok: false, error: "No reply. Reload this tab and try again."};
     } catch {
+      if (!OwlPolicy.runtimeAvailable()) dispose();
       return {ok: false, error: "Extension updated. Refresh this tab to reconnect your owl."};
     }
   }
   async function save(values: Record<string, unknown>): Promise<void> {
     try { await OwlPolicy.save(values); }
-    catch { notice("Refresh this tab to reconnect your owl.", true); }
+    catch { if (!OwlPolicy.runtimeAvailable()) dispose(); else notice("Could not save preferences. Please try again.", true); }
   }
   function renderStatus(): void {
     auto.checked = enabled;
@@ -310,8 +313,7 @@
     enabled = siteSettings.enabled !== false; visible = siteSettings.companionVisible !== false; motion = siteSettings.companionMotion !== false;
     queued = Array.isArray(siteSettings.outbox) ? siteSettings.outbox.length : 0;
     renderStatus(); position();
-  }).catch(() => { dock.hidden = true; });
-  OwlPolicy.onChange(onSettings);
+  }).catch(() => { dispose(); });
 
   listen(document, "pointerdown", event => {
     if (!event.composedPath().includes(host)) {
@@ -419,6 +421,7 @@
   function scheduleBlink(): void {
     clearTimeout(blinkTimer);
     blinkTimer = setTimeout(() => {
+      if (!OwlPolicy.runtimeAvailable()) { dispose(); return; }
       if (!document.hidden && !dock.hidden && motion && !reduced.matches && !currentActivity) {
         const blink = Math.random() < .22 ? "double-blink" : "blinking";
         dock.classList.add(blink);
@@ -438,5 +441,6 @@
     disposers.forEach(remove => remove()); host.remove();
   }
   listen(window, "owlthread:dispose-companion", dispose, {once: true});
+  if (!OwlPolicy.onChange(onSettings)) { dispose(); return; }
   position();
 })();

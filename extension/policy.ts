@@ -49,27 +49,79 @@ namespace OwlPolicy {
     return !!normalizeHost(hostname) && choice !== "blocked";
   }
 
+  // Old content scripts can outlive an extension reload, losing the runtime API.
+  let invalidated = false;
+  function runtime(): typeof chrome.runtime | undefined {
+    try { return !invalidated && typeof chrome !== "undefined" && chrome.runtime?.id ? chrome.runtime : undefined; }
+    catch { return undefined; }
+  }
+  export function runtimeAvailable(): boolean { return !!runtime(); }
+  export function getURL(path: string): string | undefined {
+    try { return runtime()?.getURL(path); } catch { return undefined; }
+  }
+  export async function sendMessage(message: unknown): Promise<any> {
+    const current = runtime();
+    if (!current) throw new Error("Extension updated. Refresh this tab to reconnect your owl.");
+    try { return await current.sendMessage(message); }
+    catch (error) {
+      if (String(error).includes("Extension context invalidated")) invalidated = true;
+      if (!runtimeAvailable()) throw new Error("Extension updated. Refresh this tab to reconnect your owl.");
+      throw error;
+    }
+  }
+
+  // Reinjection reuses this namespace. Retire its previous listeners before replacing
+  // the maps, while their original event handles are still available for cleanup.
+  const previousCleanup = OwlPolicy.disposeListeners;
+  if (typeof previousCleanup === "function") previousCleanup();
+  type MessageListener = Parameters<typeof chrome.runtime.onMessage.addListener>[0];
+  const messageListeners = new Map<MessageListener, typeof chrome.runtime.onMessage>();
+  export function addMessageListener(listener: MessageListener): boolean {
+    if (messageListeners.has(listener)) return true;
+    try {
+      const channel = runtime()?.onMessage;
+      if (!channel) return false;
+      channel.addListener(listener);
+      messageListeners.set(listener, channel);
+      return true;
+    } catch { return false; }
+  }
+  export function removeMessageListener(listener: MessageListener): void {
+    const channel = messageListeners.get(listener);
+    messageListeners.delete(listener);
+    // An invalidated event handle may throw even when chrome.runtime is absent.
+    try { channel?.removeListener(listener); } catch { /* Continue DOM cleanup. */ }
+  }
+
   // Content scripts receive only safe preferences and a queue count from the worker.
   export async function settings(): Promise<Record<string, any>> {
-    const reply = await chrome.runtime.sendMessage({type:"settings_get"});
+    const reply = await sendMessage({type:"settings_get"});
     if (!reply?.ok) throw new Error("Extension settings unavailable");
     return reply.settings;
   }
   export async function save(values: Record<string, unknown>): Promise<void> {
-    const reply = await chrome.runtime.sendMessage({type:"settings_set", values});
+    const reply = await sendMessage({type:"settings_set", values});
     if (!reply?.ok) throw new Error("Could not save preferences");
   }
   type Listener = (changes: {[key:string]:chrome.storage.StorageChange}, area:string) => void;
   const listeners = new Map<Listener, (message:any) => void>();
-  export function onChange(listener: Listener): void {
-    const bridge = (message:any):void => { if(message.type === "public_settings_changed") listener(message.changes,"local"); };
+  export function onChange(listener: Listener): boolean {
+    if (listeners.has(listener)) return true;
+    const bridge = (message:any):void => {
+      if(message?.type === "public_settings_changed" && message.changes && typeof message.changes === "object" && !Array.isArray(message.changes)) listener(message.changes,"local");
+    };
+    if (!addMessageListener(bridge)) return false;
     listeners.set(listener,bridge);
-    chrome.runtime.onMessage.addListener(bridge);
+    return true;
   }
   export function removeChange(listener: Listener): void {
     const bridge=listeners.get(listener);
-    if(bridge) chrome.runtime.onMessage.removeListener(bridge);
+    if(bridge) removeMessageListener(bridge);
     listeners.delete(listener);
+  }
+  export function disposeListeners(): void {
+    for (const listener of messageListeners.keys()) removeMessageListener(listener);
+    listeners.clear();
   }
 
   export function pageText(): string {

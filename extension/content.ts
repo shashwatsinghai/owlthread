@@ -6,6 +6,7 @@
   const hostname = OwlPolicy.normalizeHost(location.hostname);
   // This check intentionally happens before listeners, settings reads, or DOM work.
   if (OwlPolicy.hardBlocked(hostname)) return;
+  if (!OwlPolicy.runtimeAvailable()) return;
 
   type CaptureReply = {ok: boolean; error?: string; stage_id?: string};
   type Platform = {
@@ -162,8 +163,8 @@
       this.turn.userText = userText.trim().slice(0, 100000);
       const payload = {user_text: this.turn.userText, turn_key: this.turn.key, platform: platform.name,
         url: this.turn.page, title: document.title, conversation_id: conversationId()};
-      this.turn.stage = chrome.runtime.sendMessage({type: "turn_stage", payload}).then((reply: CaptureReply) =>
-        reply?.ok && reply.stage_id ? reply.stage_id : undefined).catch(() => undefined);
+      this.turn.stage = OwlPolicy.sendMessage({type: "turn_stage", payload}).then((reply: CaptureReply) =>
+        reply?.ok && reply.stage_id ? reply.stage_id : undefined).catch(() => { if (!OwlPolicy.runtimeAvailable()) dispose(); return undefined; });
     }
 
     arm(userText = ""): void {
@@ -251,7 +252,7 @@
       if (!stageId || this.turn!==turn || !this.enabled || !this.completed(node) || nodeText(node)!==text) return;
       this.pendingHashes.add(hash);
       try {
-        const reply: CaptureReply = await chrome.runtime.sendMessage({type: "turn_complete", payload: {
+        const reply: CaptureReply = await OwlPolicy.sendMessage({type: "turn_complete", payload: {
           stage_id: stageId, assistant_text: text, title: document.title, url: turn.page,conversation_id:conversationId()
         }});
         if (reply?.ok) {
@@ -259,7 +260,7 @@
           if (this.captured.size > 2000) this.captured.delete(this.captured.values().next().value!);
           if(this.turn===turn) {this.armedAt = 0;this.turn = undefined;}
         }
-      } catch { if (!chrome.runtime.id) dispose(); }
+      } catch { if (!OwlPolicy.runtimeAvailable()) dispose(); }
       finally { this.pendingHashes.delete(hash); }
     }
   }
@@ -281,7 +282,7 @@
     if (changes.enabled || Object.keys(changes).some(key => key.startsWith("siteMode:"))) loadSettings();
   };
   const onMessage = (message: {type: string}, _sender: chrome.runtime.MessageSender, respond: (reply: unknown) => void): void => {
-    if (message.type !== "capture_current") return;
+    if (message?.type !== "capture_current") return;
     respond(currentSnapshot());
   };
   const onHide = (): void => observer.stop();
@@ -295,10 +296,12 @@
     if (platform && event.target instanceof Element && event.target.closest(platform.sendSelector)) observer.arm(eventPrompt(event));
   };
   function dispose(): void {
+    if (disposed) return;
     disposed = true;
+    observer.setEnabled(false);
     observer.stop();
     OwlPolicy.removeChange(onSettings);
-    chrome.runtime.onMessage.removeListener(onMessage);
+    OwlPolicy.removeMessageListener(onMessage);
     window.removeEventListener("pagehide", onHide);
     window.removeEventListener("pageshow", onShow);
     window.removeEventListener("owlthread:dispose-observer", dispose);
@@ -306,8 +309,7 @@
     document.removeEventListener("keydown", onKey, true);
     document.removeEventListener("click", onClick, true);
   }
-  OwlPolicy.onChange(onSettings);
-  chrome.runtime.onMessage.addListener(onMessage);
+  if (!OwlPolicy.onChange(onSettings) || !OwlPolicy.addMessageListener(onMessage)) { dispose(); return; }
   window.addEventListener("pagehide", onHide);
   window.addEventListener("pageshow", onShow);
   window.addEventListener("owlthread:dispose-observer", dispose, {once: true});

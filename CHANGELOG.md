@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Handle unavailable or invalidated browser runtime APIs without `onMessage`/`getURL` crashes. Retire old listeners on reinjection and finish observer/companion cleanup after extension reloads.
+
 ## 1.6.0 — 2026-09-30 (local release candidate)
 
 - Resume browser transfers immediately after pairing, worker startup and connection recovery; drain captures queued during an in-flight sync and retain durable retries.

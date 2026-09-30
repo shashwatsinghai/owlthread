@@ -70,35 +70,116 @@ var OwlPolicy;
         return !!normalizeHost(hostname) && choice !== "blocked";
     }
     OwlPolicy.allowed = allowed;
+    // Old content scripts can outlive an extension reload, losing the runtime API.
+    let invalidated = false;
+    function runtime() {
+        try {
+            return !invalidated && typeof chrome !== "undefined" && chrome.runtime?.id ? chrome.runtime : undefined;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    function runtimeAvailable() { return !!runtime(); }
+    OwlPolicy.runtimeAvailable = runtimeAvailable;
+    function getURL(path) {
+        try {
+            return runtime()?.getURL(path);
+        }
+        catch {
+            return undefined;
+        }
+    }
+    OwlPolicy.getURL = getURL;
+    async function sendMessage(message) {
+        const current = runtime();
+        if (!current)
+            throw new Error("Extension updated. Refresh this tab to reconnect your owl.");
+        try {
+            return await current.sendMessage(message);
+        }
+        catch (error) {
+            if (String(error).includes("Extension context invalidated"))
+                invalidated = true;
+            if (!runtimeAvailable())
+                throw new Error("Extension updated. Refresh this tab to reconnect your owl.");
+            throw error;
+        }
+    }
+    OwlPolicy.sendMessage = sendMessage;
+    // Reinjection reuses this namespace. Retire its previous listeners before replacing
+    // the maps, while their original event handles are still available for cleanup.
+    const previousCleanup = OwlPolicy.disposeListeners;
+    if (typeof previousCleanup === "function")
+        previousCleanup();
+    const messageListeners = new Map();
+    function addMessageListener(listener) {
+        if (messageListeners.has(listener))
+            return true;
+        try {
+            const channel = runtime()?.onMessage;
+            if (!channel)
+                return false;
+            channel.addListener(listener);
+            messageListeners.set(listener, channel);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
+    OwlPolicy.addMessageListener = addMessageListener;
+    function removeMessageListener(listener) {
+        const channel = messageListeners.get(listener);
+        messageListeners.delete(listener);
+        // An invalidated event handle may throw even when chrome.runtime is absent.
+        try {
+            channel?.removeListener(listener);
+        }
+        catch { /* Continue DOM cleanup. */ }
+    }
+    OwlPolicy.removeMessageListener = removeMessageListener;
     // Content scripts receive only safe preferences and a queue count from the worker.
     async function settings() {
-        const reply = await chrome.runtime.sendMessage({ type: "settings_get" });
+        const reply = await sendMessage({ type: "settings_get" });
         if (!reply?.ok)
             throw new Error("Extension settings unavailable");
         return reply.settings;
     }
     OwlPolicy.settings = settings;
     async function save(values) {
-        const reply = await chrome.runtime.sendMessage({ type: "settings_set", values });
+        const reply = await sendMessage({ type: "settings_set", values });
         if (!reply?.ok)
             throw new Error("Could not save preferences");
     }
     OwlPolicy.save = save;
     const listeners = new Map();
     function onChange(listener) {
-        const bridge = (message) => { if (message.type === "public_settings_changed")
-            listener(message.changes, "local"); };
+        if (listeners.has(listener))
+            return true;
+        const bridge = (message) => {
+            if (message?.type === "public_settings_changed" && message.changes && typeof message.changes === "object" && !Array.isArray(message.changes))
+                listener(message.changes, "local");
+        };
+        if (!addMessageListener(bridge))
+            return false;
         listeners.set(listener, bridge);
-        chrome.runtime.onMessage.addListener(bridge);
+        return true;
     }
     OwlPolicy.onChange = onChange;
     function removeChange(listener) {
         const bridge = listeners.get(listener);
         if (bridge)
-            chrome.runtime.onMessage.removeListener(bridge);
+            removeMessageListener(bridge);
         listeners.delete(listener);
     }
     OwlPolicy.removeChange = removeChange;
+    function disposeListeners() {
+        for (const listener of messageListeners.keys())
+            removeMessageListener(listener);
+        listeners.clear();
+    }
+    OwlPolicy.disposeListeners = disposeListeners;
     function pageText() {
         const blocked = "input,textarea,select,option,[contenteditable],script,style,noscript,[hidden],[aria-hidden=true],#owlthread-companion";
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode(node) {

@@ -47,9 +47,9 @@ async function run() {
     const replacement = context.waitForEvent("serviceworker", {predicate: candidate => candidate !== worker});
     await worker.evaluate(() => chrome.runtime.reload()).catch(() => undefined);
     worker = await replacement;
-    await worker.evaluate(async () => {
+    const installTransport = async state => {
       await chrome.storage.local.set({localApiToken:"t".repeat(43)});
-      globalThis.testOnline = false; globalThis.testCaptures = []; globalThis.testRequests = [];
+      globalThis.testOnline = state?.online || false; globalThis.testCaptures = state?.captures || []; globalThis.testRequests = state?.requests || [];
       globalThis.fetch = async (url, options = {}) => {
         globalThis.testRequests.push(url);
         if (!globalThis.testOnline) throw new Error("Desktop offline (test)");
@@ -60,7 +60,8 @@ async function run() {
           {status: "healthy", total_entries: 12, pending_captures: 0, model_ready:true, model_name:"gemini-3.5-flash-lite"};
         return new Response(JSON.stringify(response), {status: 200, headers: {"Content-Type": "application/json"}});
       };
-    });
+    };
+    await worker.evaluate(installTransport);
     const dock = page.locator("#owlthread-companion .dock");
     const owl = page.getByRole("button", {name: "Open OwlThread companion.", exact: false});
     const panel = page.getByRole("dialog", {name: "OwlThread memory companion"});
@@ -157,7 +158,7 @@ async function run() {
     const denied=await worker.evaluate(()=>chrome.storage.local.get("siteMode:example.com"));
     assert.equal(denied["siteMode:example.com"],"blocked");
     await page.setViewportSize({width: 1365, height: 900});
-    const popup = await context.newPage();
+    let popup = await context.newPage();
     popup.setDefaultTimeout(30000);
     popup.on("pageerror", error => pageErrors.push(error.message));
     await popup.goto(`chrome-extension://${id}/popup/popup.html`);
@@ -200,7 +201,29 @@ async function run() {
     // Invoke the toolbar capture command without selecting any text.
     const manual = await popup.evaluate(() => chrome.runtime.sendMessage({type: "capture_active"}));
     assert.equal(manual.ok, true, manual.error);
+    const deliveryDeadline=Date.now()+5000;
+    while((await worker.evaluate(async()=> (await chrome.storage.local.get({outbox:[]})).outbox.length)) && Date.now()<deliveryDeadline) await page.waitForTimeout(50);
+    assert.equal(await worker.evaluate(async()=> (await chrome.storage.local.get({outbox:[]})).outbox.length),0,"captures drain before the active-tab reload");
+    const mockState=await worker.evaluate(()=>({online:globalThis.testOnline,captures:globalThis.testCaptures,requests:globalThis.testRequests}));
+    const nextWorker=context.waitForEvent("serviceworker",{predicate:candidate=>candidate!==worker});
+    await worker.evaluate(()=>chrome.runtime.reload()).catch(()=>undefined);
+    worker=await nextWorker;await worker.evaluate(installTransport,mockState);
+    await page.locator("#owlthread-companion").waitFor({state:"attached"});await dock.waitFor({state:"visible"});
+    assert.equal(await page.locator("#owlthread-companion").count(),1,"extension reload preserves one owl on the existing active tab");
+    await worker.evaluate(async()=>{const [tab]=await chrome.tabs.query({url:"https://example.com/*"});for(let i=0;i<3;i++) await chrome.scripting.executeScript({target:{tabId:tab.id},files:["policy.js","content.js","companion.js"]});});
+    assert.equal(await page.locator("#owlthread-companion").count(),1,"reinjection after a live reload remains idempotent");
+    await owl.click();await panel.waitFor({state:"visible"});
+    await page.getByRole("button",{name:"Remember current turn / page"}).click();
+    await page.waitForFunction(()=>document.querySelector("#owlthread-companion").shadowRoot.querySelector(".feedback").textContent.startsWith("Remembered."));
+    await page.getByRole("button",{name:"Close companion panel",exact:true}).click();
+    stage("active-tab-reload-capture");
     await page.goto("chrome://extensions/");
+    // Chrome closes extension-owned tabs on reload; the website tab stays open.
+    if(popup.isClosed()) {
+      popup=await context.newPage();popup.setDefaultTimeout(30000);
+      popup.on("pageerror",error=>pageErrors.push(error.message));
+      await popup.goto(`chrome-extension://${id}/popup/popup.html`);
+    } else await popup.reload();
     const restricted = await popup.evaluate(() => chrome.runtime.sendMessage({type: "show_owl"}));
     assert.equal(restricted.ok, false);
     assert.match(restricted.error, /normal website/);
@@ -214,7 +237,7 @@ async function run() {
     assert.equal(await page.locator("#owlthread-companion").count(),0,"Netflix is an immutable no-injection boundary");
     assert.equal(await worker.evaluate(()=>globalThis.testRequests.length),requestCount,"Netflix load makes no requests");
     assert.deepEqual(pageErrors, []);
-    console.log(JSON.stringify({browser: label, installed: true, cozyArtwork:true, notebookWriting:true, magnifyingGlass:true, naturalBlink:true, compactOwl:true, hardBlockedYouTube:true, permanentSiteRefusal:true, noSelectionCapture:true, extensionReload: true, actualDesktopHealth: actualHealth, explicitAwareness: true, eyeTracking: true, offlineCapture: true, sync: true, dragPersistence: true, reinjection: true, narrowViewport: true, reducedMotion: true, popup: true, restrictedPageFeedback: true, pageErrors, screenshots: artifacts}, null, 2));
+    console.log(JSON.stringify({browser: label, installed: true, cozyArtwork:true, notebookWriting:true, magnifyingGlass:true, naturalBlink:true, compactOwl:true, hardBlockedYouTube:true, permanentSiteRefusal:true, noSelectionCapture:true, extensionReload: true, activeTabReloadCapture:true, actualDesktopHealth: actualHealth, explicitAwareness: true, eyeTracking: true, offlineCapture: true, sync: true, dragPersistence: true, reinjection: true, narrowViewport: true, reducedMotion: true, popup: true, restrictedPageFeedback: true, pageErrors, screenshots: artifacts}, null, 2));
   } finally { await context.close(); }
 }
 run().catch(error => {console.error(error);process.exitCode = 1;});

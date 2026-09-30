@@ -8,6 +8,8 @@
     // This check intentionally happens before listeners, settings reads, or DOM work.
     if (OwlPolicy.hardBlocked(hostname))
         return;
+    if (!OwlPolicy.runtimeAvailable())
+        return;
     const platforms = {
         "chatgpt.com": {
             name: "chatgpt",
@@ -147,7 +149,8 @@
             this.turn.userText = userText.trim().slice(0, 100000);
             const payload = { user_text: this.turn.userText, turn_key: this.turn.key, platform: platform.name,
                 url: this.turn.page, title: document.title, conversation_id: conversationId() };
-            this.turn.stage = chrome.runtime.sendMessage({ type: "turn_stage", payload }).then((reply) => reply?.ok && reply.stage_id ? reply.stage_id : undefined).catch(() => undefined);
+            this.turn.stage = OwlPolicy.sendMessage({ type: "turn_stage", payload }).then((reply) => reply?.ok && reply.stage_id ? reply.stage_id : undefined).catch(() => { if (!OwlPolicy.runtimeAvailable())
+                dispose(); return undefined; });
         }
         arm(userText = "") {
             if (!this.enabled || !platform)
@@ -255,7 +258,7 @@
                 return;
             this.pendingHashes.add(hash);
             try {
-                const reply = await chrome.runtime.sendMessage({ type: "turn_complete", payload: {
+                const reply = await OwlPolicy.sendMessage({ type: "turn_complete", payload: {
                         stage_id: stageId, assistant_text: text, title: document.title, url: turn.page, conversation_id: conversationId()
                     } });
                 if (reply?.ok) {
@@ -269,7 +272,7 @@
                 }
             }
             catch {
-                if (!chrome.runtime.id)
+                if (!OwlPolicy.runtimeAvailable())
                     dispose();
             }
             finally {
@@ -297,7 +300,7 @@
             loadSettings();
     };
     const onMessage = (message, _sender, respond) => {
-        if (message.type !== "capture_current")
+        if (message?.type !== "capture_current")
             return;
         respond(currentSnapshot());
     };
@@ -314,10 +317,13 @@
             observer.arm(eventPrompt(event));
     };
     function dispose() {
+        if (disposed)
+            return;
         disposed = true;
+        observer.setEnabled(false);
         observer.stop();
         OwlPolicy.removeChange(onSettings);
-        chrome.runtime.onMessage.removeListener(onMessage);
+        OwlPolicy.removeMessageListener(onMessage);
         window.removeEventListener("pagehide", onHide);
         window.removeEventListener("pageshow", onShow);
         window.removeEventListener("owlthread:dispose-observer", dispose);
@@ -325,8 +331,10 @@
         document.removeEventListener("keydown", onKey, true);
         document.removeEventListener("click", onClick, true);
     }
-    OwlPolicy.onChange(onSettings);
-    chrome.runtime.onMessage.addListener(onMessage);
+    if (!OwlPolicy.onChange(onSettings) || !OwlPolicy.addMessageListener(onMessage)) {
+        dispose();
+        return;
+    }
     window.addEventListener("pagehide", onHide);
     window.addEventListener("pageshow", onShow);
     window.addEventListener("owlthread:dispose-observer", dispose, { once: true });
