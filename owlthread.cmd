@@ -1,8 +1,8 @@
 @echo off
 if exist "%~dp0.venv\Scripts\python.exe" (
   "%~dp0.venv\Scripts\python.exe" -m owlthread %*
-) else if exist "%~dp0artifacts\dist\1.6.0\OwlThread\owlthread-cli.exe" (
-  "%~dp0artifacts\dist\1.6.0\OwlThread\owlthread-cli.exe" %*
+) else if exist "%~dp0artifacts\dist\1.7.0\OwlThread\owlthread-cli.exe" (
+  "%~dp0artifacts\dist\1.7.0\OwlThread\owlthread-cli.exe" %*
 ) else if exist "%~dp0artifacts\dist\OwlThread\owlthread-cli.exe" (
   "%~dp0artifacts\dist\OwlThread\owlthread-cli.exe" %*
 ) else (

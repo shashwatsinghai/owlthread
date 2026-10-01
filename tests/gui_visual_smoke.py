@@ -27,7 +27,7 @@ def drain(app: OwlThreadApp) -> None:
 
 
 def main() -> None:
-    output=Path(__file__).resolve().parents[1]/"artifacts"/"audit-2026-09-30"
+    output=Path(__file__).resolve().parents[1]/"artifacts"/"ui-refresh-2026-10-01"
     output.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"visual.db")) as db:
         project_id=db.get_or_create_project("Demo project")
@@ -50,7 +50,7 @@ def main() -> None:
             images=[]
             for size,width,height in (("normal",1180,800),("minimum",920,650)):
                 app.geometry(f"{width}x{height}+20+20")
-                for view in ("feed","captures","integrations","settings"):
+                for view in ("feed","search","quadrants","capture","primer","captures","integrations","settings"):
                     app.show_view(view)
                     drain(app)
                     deadline=time.monotonic()+.35
@@ -62,6 +62,14 @@ def main() -> None:
                     path=output/f"desktop-{view}-{size}.png"
                     ImageGrab.grab(window=app.winfo_id()).save(path)
                     images.append({"path":str(path),"width":app.winfo_width(),"height":app.winfo_height()})
+                    if view == "settings":
+                        for index,section in ((1,"model"),(2,"capture-options"),(3,"advanced")):
+                            app.settings_tabs.select(index);app.update()
+                            ImageGrab.grab(window=app.winfo_id()).save(output/f"desktop-settings-{section}-{size}.png")
+                    if view == "search":
+                        app.search_query.set("no-matching-memory");app._search();drain(app)
+                        ImageGrab.grab(window=app.winfo_id()).save(output/f"desktop-search-empty-{size}.png")
+                        app.search_query.set("")
             print(json.dumps(images,indent=2))
         finally:
             drain(app)

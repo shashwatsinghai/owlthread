@@ -175,6 +175,9 @@ def enrich_status(db: Any, base: dict[str, Any]) -> dict[str, Any]:
     credential = db.get_setting(key, "") if stored else ""
     base.update({"credential_stored": stored, "options": options, "last_checked_at": None,
                  "last_sync_at": None, "last_error": None, "verification_cached": False})
+    browser_auth = _json_setting(db, "integration_auth:", integration_id)
+    base.update({"auth_method": browser_auth.get("method", "token"),
+                 "signed_in": bool(credential) and browser_auth.get("method") == "browser"})
     if not base["configuration_valid"] or not base["enabled"]:
         return base
     if not credential:
@@ -260,6 +263,7 @@ class ContextConnectorService:
                 raise ValueError("API token must be text without spaces or control characters")
             # Prefix belongs to DatabaseManager's protected settings, never plain config.
             self.db.set_setting(CREDENTIAL_PREFIX + integration_id, token)
+            self.db.set_setting("integration_auth:" + integration_id, "{}")
         self.db.set_setting(OPTIONS_PREFIX + integration_id, json.dumps(options, sort_keys=True))
         from owlthread.integrations.registry import IntegrationRegistry
         return IntegrationRegistry(self.db).configure(integration_id, enabled=enabled, scopes=scopes, project_id=project_id)
@@ -269,6 +273,7 @@ class ContextConnectorService:
         if integration_id not in SUPPORTED_SCOPES:
             raise ValueError("This integration has no bundled context client")
         self.db.set_setting(CREDENTIAL_PREFIX + integration_id, "")
+        self.db.set_setting("integration_auth:" + integration_id, "{}")
         from owlthread.integrations.registry import IntegrationRegistry
         return IntegrationRegistry(self.db).configure(integration_id, enabled=False, scopes=[], project_id=None)
 
@@ -278,6 +283,11 @@ class ContextConnectorService:
             raise ValueError("This integration has no bundled context client")
         if not status["can_execute"]:
             raise ValueError("Enable this connector and provide a token, read scopes, resource IDs and a project first")
+        from owlthread.integrations.browser_login import refresh_browser_credential
+        refresh_browser_credential(self.db,integration_id)
+        status = self.status(integration_id)
+        if not status["can_execute"]:
+            raise ValueError("Connector setup changed during sign-in renewal; enable it and test or import again")
         # Read grant, options and encrypted token in one SQLite snapshot so the
         # revision always describes the exact credential used for the request.
         keys = [prefix + integration_id for prefix in ("integration_config:", OPTIONS_PREFIX, CREDENTIAL_PREFIX)]
@@ -304,11 +314,18 @@ class ContextConnectorService:
         records: list[dict[str, Any]] = []
         truncated = False
         options = _options(integration_id, status["options"], status["configured_scopes"])
+        transport = self.transport
+        if integration_id == "cloudflare":
+            from owlthread.integrations.browser_login import is_cloudflare_oauth, CloudflareMcpTransport
+            if is_cloudflare_oauth(token): transport = CloudflareMcpTransport()
+        else:
+            from owlthread.integrations.browser_login import is_github_oauth
+            if is_github_oauth(token): token = json.loads(token)["access_token"]
         for scope in status["configured_scopes"]:
             if integration_id == "cloudflare":
                 account, zone = options["account_id"], options["zone_id"]
                 if scope == "zones.read":
-                    response = self.transport.get(integration_id, "/zones", token,
+                    response = transport.get(integration_id, "/zones", token,
                         {"account.id": account, "per_page": min(50, max(5, limit)), "page": 1})
                     # Defensive account isolation even if a provider/fixture ignores its filter.
                     if not isinstance(response.data, list) or any(not isinstance(item, dict) or
@@ -316,14 +333,14 @@ class ContextConnectorService:
                         raise ProviderError("Cloudflare returned zones outside the selected account")
                     fields = ("id", "name", "status", "paused", "type", "name_servers", "created_on", "modified_on")
                 elif scope == "dns.read":
-                    response = self.transport.get(integration_id, f"/zones/{zone}/dns_records", token,
+                    response = transport.get(integration_id, f"/zones/{zone}/dns_records", token,
                         {"per_page": limit, "page": 1})
                     fields = ("id", "name", "type", "content", "ttl", "proxied", "priority", "created_on", "modified_on")
                 elif scope == "workers.read":
-                    response = self.transport.get(integration_id, f"/accounts/{account}/workers/scripts", token)
+                    response = transport.get(integration_id, f"/accounts/{account}/workers/scripts", token)
                     fields = ("id", "created_on", "modified_on", "etag", "handlers", "compatibility_date")
                 else:
-                    response = self.transport.get(integration_id, f"/accounts/{account}/pages/projects", token,
+                    response = transport.get(integration_id, f"/accounts/{account}/pages/projects", token,
                         {"per_page": limit, "page": 1})
                     fields = ("id", "name", "subdomain", "domains", "created_on", "production_branch")
             else:
@@ -411,10 +428,12 @@ class ContextConnectorService:
         return {"ok": True, "sampled_count": len(records), "truncated": truncated,
                 "status": self.status(integration_id)}
 
-    def sync(self, integration_id: str, limit: int = 25) -> dict[str, Any]:
+    def sync(self, integration_id: str, limit: int = 25, *, expected_revision: str | None = None) -> dict[str, Any]:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("limit must be an integer from 1 to 100 per selected scope")
         status, token, revision = self._setup(integration_id)
+        if expected_revision is not None and expected_revision != revision:
+            raise PermissionError("Connection changed after selection; choose the current resource again")
         try:
             records, truncated = self._fetch(integration_id, status, token, limit)
             prepared: list[tuple[str, str, str]] = []
@@ -427,6 +446,11 @@ class ContextConnectorService:
                             "resource": _scope_resource(integration_id, record["scope"], status["options"]), "data": data}
                 # Defensive redaction if a provider resource body contains the supplied token.
                 raw = json.dumps(envelope, ensure_ascii=False, sort_keys=True, indent=2).replace(token, "[credential redacted]")
+                from owlthread.integrations.browser_login import is_cloudflare_oauth, is_github_oauth
+                if is_cloudflare_oauth(token) or is_github_oauth(token):
+                    for field in ("access_token", "refresh_token"):
+                        secret = json.loads(token).get(field)
+                        if secret: raw = raw.replace(secret, "[credential redacted]")
                 if len(raw) > MAX_RECORD_CHARS:
                     raise ProviderError("A provider context record is too large; narrow the selected resource")
                 prepared.append((raw, record["scope"], hashlib.sha256(raw.encode()).hexdigest()))

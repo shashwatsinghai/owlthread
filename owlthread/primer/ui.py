@@ -5,11 +5,13 @@ import queue
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 from typing import Any
 from owlthread.primer.engine import PrimerEngine,PrimerResult
 from owlthread.gui.animations import Animator
+from owlthread.gui.theme import BG, TEXT, MUTED, ACCENT, CARD, SURFACE, RoundedFrame, button
+
 logger = logging.getLogger(__name__)
-BG,TEXT,MUTED,ACCENT = "#1a1a2e","#e2e8f0","#a4abc2","#a7a1ff"
 
 
 class PrimerPanel(tk.Frame):
@@ -23,29 +25,32 @@ class PrimerPanel(tk.Frame):
         self._conversation_started = False
         self.query = tk.StringVar(value=initial_query)
         tk.Label(self,text="Ask OwlThread.",bg=BG,fg=TEXT,font=("Segoe UI",22,"bold"),anchor="w").pack(fill="x",pady=(0,6))
-        tk.Label(self,text="Say what you're about to build. OwlThread finds the related\ndecisions, constraints, questions and captured conversation evidence.",bg=BG,fg=MUTED,
+        tk.Label(self,text="Describe your task or ask a question. Find the decisions and details you have already saved.",wraplength=340,bg=BG,fg=MUTED,
                  justify="left",anchor="w",font=("Segoe UI",10)).pack(fill="x",pady=(0,20))
-        self.input = tk.Entry(self,textvariable=self.query,bg="#272740",fg=TEXT,insertbackground=ACCENT,
+        input_frame = RoundedFrame(self,bg=CARD,padx=16,pady=12)
+        input_frame.pack(fill="x")
+        self.input = tk.Entry(input_frame,textvariable=self.query,bg=CARD,fg=TEXT,insertbackground=ACCENT,
                               relief="flat",font=("Segoe UI",12))
-        self.input.pack(fill="x",ipady=12)
+        self.input.pack(fill="x")
         self.input.bind("<Return>",lambda _:self.generate())
-        self.button = tk.Button(self,text="Find related context  ↗",command=self.generate,bg=ACCENT,fg="#17172b",
-                                activebackground="#bbb6ff",relief="flat",font=("Segoe UI",11,"bold"),cursor="hand2")
-        self.button.pack(fill="x",pady=(10,12),ipady=9)
-        self.badge = tk.Label(self,text="Intent · auto detect",bg=BG,fg=MUTED,anchor="w",font=("Segoe UI",9))
+        self.button = button(self,"Find related context",self.generate,True)
+        self.button.pack(fill="x",pady=(10,12))
+        self.badge = tk.Label(self,text="Try: What did we decide about authentication?",wraplength=340,justify="left",bg=BG,fg=MUTED,anchor="w",font=("Segoe UI",9))
         self.badge.pack(fill="x",pady=(0,12))
-        output_frame = tk.Frame(self,bg=BG)
+        output_frame = RoundedFrame(self,bg=CARD,padx=16,pady=16)
         output_frame.pack(fill="both",expand=True)
-        scroll = tk.Scrollbar(output_frame)
+        scroll = ttk.Scrollbar(output_frame)
         scroll.pack(side="right",fill="y")
-        self.output = tk.Text(output_frame,wrap="word",bg="#151528",fg=TEXT,insertbackground=TEXT,relief="flat",
-                              height=1,width=1,padx=16,pady=16,font=("Segoe UI",10),yscrollcommand=scroll.set)
+        self.output = tk.Text(output_frame,wrap="word",bg=CARD,fg=TEXT,insertbackground=TEXT,relief="flat",
+                              height=1,width=1,padx=0,pady=0,font=("Segoe UI",10),yscrollcommand=scroll.set)
         self.output.pack(fill="both",expand=True)
         scroll.configure(command=self.output.yview)
-        self.output.insert("1.0","Start a local context conversation.\n\nTry “I'm going to build the billing system”, “what did we decide about auth?”, or Hinglish such as “main payments feature banane ja raha hoon”.\n\nType “done” to extract your latest captures.")
+        self.output.insert("1.0","Your next task starts with context.\n\nAsk about a previous decision, or describe what you are building. Your related memories and captures will appear here.\n\nYou can ask in English or Hinglish. Type “done” to extract your latest captures.")
         self.output.configure(state="disabled")
-        self.notice = tk.Label(self,text="Local search first · one bounded AI synthesis at most · copied automatically",bg=BG,fg=MUTED,anchor="w",font=("Segoe UI",9))
-        self.notice.pack(fill="x",pady=(12,0))
+        self.notice = tk.Label(self,text="Searches saved context · copies the result to your clipboard",wraplength=340,justify="left",bg=BG,fg=MUTED,anchor="w",font=("Segoe UI",9))
+        self.notice.pack(side="bottom",fill="x",pady=(12,0))
+        output_frame.pack_forget()
+        output_frame.pack(fill="both",expand=True)
         self._poll_id = self.after(80,self._poll)
         self.bind("<Destroy>",self._destroyed)
 
@@ -80,7 +85,7 @@ class PrimerPanel(tk.Frame):
             pass
         else:
             self.busy = False
-            self.button.configure(state="normal",text="Find related context  ↗")
+            self.button.configure(state="normal",text="Find related context")
             if isinstance(value,Exception):
                 self._append_message("OwlThread", "I couldn't compile that context. Your saved memory was not changed.")
                 self.notice.configure(text="Could not generate context. Please try again.",fg="#f59e0b")
@@ -103,7 +108,9 @@ class PrimerPanel(tk.Frame):
             self._conversation_started = True
         elif self.output.get("1.0","end-1c").strip():
             self.output.insert("end","\n\n")
-        self.output.insert("end",f"{speaker}\n{text.strip()}")
+        self.output.tag_configure("speaker",foreground=ACCENT,font=("Segoe UI",10,"bold"),spacing1=10,spacing3=6)
+        self.output.insert("end",f"{speaker}\n","speaker")
+        self.output.insert("end",text.strip())
         self.output.configure(state="disabled")
         self.output.see("end")
 
@@ -115,11 +122,11 @@ class PrimerPopupUI(tk.Toplevel):
         self.title("OwlThread — Task primer")
         self.attributes("-topmost",True)
         self.geometry(f"400x600+{(self.winfo_screenwidth()-400)//2}+{(self.winfo_screenheight()-600)//2}")
-        bar = tk.Frame(self,bg="#25253e",height=40)
+        bar = tk.Frame(self,bg=SURFACE,height=40)
         bar.pack(fill="x")
-        title = tk.Label(bar,text="◉  OwlThread",bg="#25253e",fg=TEXT,font=("Segoe UI",10,"bold"),padx=16,pady=10)
+        title = tk.Label(bar,text="◉  OwlThread",bg=SURFACE,fg=TEXT,font=("Segoe UI",10,"bold"),padx=16,pady=10)
         title.pack(side="left")
-        tk.Button(bar,text="✕",command=self.close,bg="#25253e",fg=MUTED,relief="flat").pack(side="right",padx=8)
+        tk.Button(bar,text="✕",command=self.close,bg=SURFACE,fg=MUTED,relief="flat").pack(side="right",padx=8)
         self._drag = (0,0)
         title.bind("<Button-1>",self._drag_start)
         title.bind("<B1-Motion>",self._drag_move)

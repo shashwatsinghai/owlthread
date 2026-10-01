@@ -1,4 +1,4 @@
-# OwlThread 1.6.0
+# OwlThread 1.7.0
 
 **State your task, get context.** OwlThread keeps project memory on your computer and produces a cited Markdown brief for the task you describe. The desktop, command line, browser companion and MCP tools share one SQLite database.
 
@@ -17,13 +17,13 @@ This is a release candidate. See [verification](docs/VERIFICATION.md) for measur
 | Git metadata and selected diffs | Implemented explicit opt-in command; temporary real Git repositories tested |
 | Provider adapters | Request/error fixtures tested; no paid-provider credential test or local Ollama model run in this audit |
 | MCP | Real stdio client/server and packaged executable smoke tests; see verification for exact results |
-| Built-in Cloudflare/GitHub context clients and 29-service catalog | Cloudflare/GitHub read-only clients are bundled; explicit token/resource setup, test and context import are required. Other services remain catalog definitions |
+| Built-in Cloudflare/GitHub context clients and 29-service catalog | Browser sign-in, discovered account/repository choices and explicit context import are bundled. All other services show Coming soon |
 | Cloud sync, semantic embeddings, generic browser history, background Git watching | Not implemented |
 | Firefox/Safari extension, signed installer, macOS/Linux native desktop release | Unsupported in this release |
 
 ## Install on Windows
 
-Release files are under `artifacts/release/1.6.0/`. Extract `OwlThread-Windows-1.6.0.zip` into a new folder. Keep the complete folder together. Use **Open OwlThread.bat** for the desktop or **Start tray.bat** for the background app. `owlthread-cli.exe --version` reports the version. No separate Python is required for the portable build. The binaries are unsigned.
+Release files are under `artifacts/release/1.7.0/`. Extract `OwlThread-Windows-1.7.0.zip` into a new folder. Keep the complete folder together. Use **Open OwlThread.bat** for the desktop or **Start tray.bat** for the background app. `owlthread-cli.exe --version` reports the version. No separate Python is required for the portable build. The binaries are unsigned.
 
 From source, use Python 3.11+ with Tk support (this audit used Windows Python 3.14):
 
@@ -48,7 +48,7 @@ For the exact Windows build environment, install `requirements-windows.lock` bef
 
 ## Browser installation and pairing
 
-Extract `OwlThread-Chrome-Brave-1.6.0.zip`, or use the Windows package's `extension` folder. In Chrome/Brave's extensions page, enable Developer mode and choose **Load unpacked** on the folder containing `manifest.json`. Reload the extension and refresh websites after an update.
+Extract `OwlThread-Chrome-Brave-1.7.0.zip`, or use the Windows package's `extension` folder. In Chrome/Brave's extensions page, enable Developer mode and choose **Load unpacked** on the folder containing `manifest.json`. Reload the extension and refresh websites after an update.
 
 In desktop Settings, choose **Copy pairing secret**. Paste it only into the OwlThread popup's **Preferences & connection → Connection settings**, then pair. The secret grants access to local memory; do not paste it into a web page or chat. Choose a capture project in the same popup. Each browser pairs separately with the same desktop at `127.0.0.1:41789`. **Revoke browser connections** rotates the secret and requires all browsers to pair again. A copied secret uses the clipboard, whose history/cloud-sync settings are controlled by Windows.
 
@@ -118,7 +118,7 @@ Or use the source environment's `python.exe` with arguments `-m`, `owlthread`, `
 
 ## Integration catalog and access boundary
 
-The Connect view and MCP catalog expose 29 definitions: Cloudflare, GitHub, Gmail, Google Calendar/Drive, Dropbox, Box, Airtable, Asana, ClickUp, Trello, Figma, Todoist, TickTick, Granola, Fathom, Plaud, Spotify, Apple Music, SciSpace, Consensus, Runway, Apollo.io, Maersk, CoinMarketCap, CoinGecko, Alpaca, Interactive Brokers and Binance. Every definition starts disabled and unconnected. Cloudflare and GitHub have built-in read-only context clients: open Connect, choose the service, enter a token and resource IDs, select exact read scopes, save, test and sync. There is no separate plugin installation. Successful provider checks are cached for 15 minutes and invalidated when credentials or grants change. Other services expose local permission definitions only. Admin, destructive and trading scopes cannot be granted through OwlThread MCP. These built-in clients execute no write/deploy/delete operations, even if the broader catalog defines write scopes. Read [connector setup](docs/CONNECTORS.md) for resources, limits and evidence boundaries.
+The Connect view and MCP catalog expose 29 definitions: Cloudflare, GitHub, Gmail, Google Calendar/Drive, Dropbox, Box, Airtable, Asana, ClickUp, Trello, Figma, Todoist, TickTick, Granola, Fathom, Plaud, Spotify, Apple Music, SciSpace, Consensus, Runway, Apollo.io, Maersk, CoinMarketCap, CoinGecko, Alpaca, Interactive Brokers and Binance. Every definition starts disabled and unconnected. For Cloudflare/GitHub, open **Connect → Sign in**, finish browser approval, choose a discovered account/public repository, then import. GitHub shows a short device code to enter in the browser. Cloudflare uses its official MCP service; GitHub uses OwlThread's registered public client. Expiring credentials renew locally. Manual token setup remains under **Advanced**, including private GitHub repositories and Cloudflare DNS zone selection. There is no separate plugin installation. Successful provider checks are cached for 15 minutes and invalidated when credentials or grants change. Other services expose local permission definitions only. Admin, destructive and trading scopes cannot be granted through OwlThread MCP. These built-in clients execute no write/deploy/delete operations, even if the broader catalog defines write scopes. Read [connector setup](docs/CONNECTORS.md) for resources, limits and evidence boundaries.
 
 ## Backup, restore and migration
 

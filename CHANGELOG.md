@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.7.0 — 2026-10-01 (local release candidate)
+
+- Add browser sign-in on Connect for Cloudflare and GitHub, discovered account/public repository choices, cancellation and explicit context import into the project chosen when sign-in starts.
+- Use Cloudflare public-client OAuth with PKCE and its official MCP service; register OwlThread's GitHub device-flow client without embedding a client secret.
+- Protect and renew expiring provider tokens locally; reject stale renewal writes after disconnect and redact access/refresh tokens from captures and public status.
+- Keep manual token setup under Advanced, preserve drafts and uniquely distinguish accounts with the same name.
+- Mark every integration except Cloudflare and GitHub as Coming soon and remove its desktop setup controls.
 - Handle unavailable or invalidated browser runtime APIs without `onMessage`/`getURL` crashes. Retire old listeners on reinjection and finish observer/companion cleanup after extension reloads.
 
 ## 1.6.0 — 2026-09-30 (local release candidate)

@@ -18,20 +18,16 @@ from owlthread.primer.engine import PrimerEngine
 from owlthread.primer.llm import LLMClient, DEFAULTS
 from owlthread.primer.search import MemorySearcher
 from owlthread.primer.ui import PrimerPanel, PrimerPopupUI
+from owlthread.gui.theme import BG, CARD, TEXT, MUTED, ACCENT, SIDEBAR, BORDER, SELECTED, RoundedFrame, SegmentedTabs, button
 
 logger = logging.getLogger(__name__)
-BG,CARD,TEXT,MUTED,ACCENT = "#1a1a2e","#222239","#e2e8f0","#a4abc2","#a7a1ff"
 
 
 def label(master: tk.Misc, text: str, size: int = 11, color: str = TEXT, bold: bool = False) -> tk.Label:
-    return tk.Label(master,text=text,bg=master.cget("bg"),fg=color,font=("Segoe UI",size,"bold" if bold else "normal"),
-                    justify="left",anchor="w")
-
-
-def button(master: tk.Misc, text: str, command: Callable[[],None], primary: bool = False) -> tk.Button:
-    return tk.Button(master,text=text,command=command,bg=ACCENT if primary else "#30304b",fg="#161628" if primary else TEXT,
-                     activebackground="#b7b1ff" if primary else "#41415f",activeforeground="#161628" if primary else TEXT,
-                     relief="flat",bd=0,padx=15,pady=9,font=("Segoe UI",10,"bold"),cursor="hand2")
+    widget = tk.Label(master,text=text,bg=master.cget("bg"),fg=color,font=("Segoe UI",size,"bold" if bold else "normal"),
+                      justify="left",anchor="w")
+    widget.bind("<Configure>",lambda event:widget.configure(wraplength=max(100,event.width)))
+    return widget
 
 
 class ScrollFrame(tk.Frame):
@@ -60,7 +56,7 @@ class OwlThreadApp(tk.Tk):
         self.port = port
         self.engine = CaptureEngine(self.db,http_port=port) if auto_start_engine else None
         self.primer_engine = PrimerEngine(self.db,extraction_pipeline=self.engine.pipeline if self.engine else None)
-        self.title("OwlThread — State your task, get context.")
+        self.title("OwlThread — Your personal workspace")
         self.geometry("1180x800")
         self.minsize(920,650)
         self.configure(bg=BG)
@@ -74,6 +70,10 @@ class OwlThreadApp(tk.Tk):
         self._tick_id: str | None = None
         self._refresh_id: str | None = None
         self.current_view = "feed"
+        self._note_drafts: dict[str,str] = {}
+        self._search_text = ""
+        self._settings_draft: dict[str,str] = {}
+        self._saving_capture = False
         self.views: dict[str,tk.Frame] = {}
         self._scrolls: list[ScrollFrame] = []
         self._last_counts = (-1,-1)
@@ -87,6 +87,11 @@ class OwlThreadApp(tk.Tk):
         self._capture_status: dict[str,Any] = {}
         self._transfer_status: dict[str,Any] = {}
         self._captures: list[dict[str,Any]] = []
+        from owlthread.integrations.browser_login import BrowserLoginService
+        self.login_service = BrowserLoginService(self.db)
+        self._browser_fields: dict[str,dict[str,Any]] = {}
+        self._login_tick_id: str | None = None
+        self._connector_advanced_open: dict[str,bool] = {}
         self.project = tk.StringVar(value=self._settings.get("active_project","General"))
         self._style()
         self._build()
@@ -94,6 +99,9 @@ class OwlThreadApp(tk.Tk):
         self.bind("<MouseWheel>",self._wheel)
         self.bind("<Button-4>",self._wheel)
         self.bind("<Button-5>",self._wheel)
+        self.bind("<Control-k>",lambda _:self._shortcut("search"))
+        self.bind("<Control-n>",lambda _:self._shortcut("capture"))
+        self.bind("<Control-s>",self._save_shortcut)
         self.bind("<Control-Shift-P>",lambda _:self.open_primer())
         self.bind("<Control-Shift-p>",lambda _:self.open_primer())
         self._tick()
@@ -115,49 +123,73 @@ class OwlThreadApp(tk.Tk):
     def _style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
+        style.layout("Vertical.TScrollbar",[("Vertical.Scrollbar.trough",{"sticky":"ns","children":[("Vertical.Scrollbar.thumb",{"expand":"1","sticky":"nswe"})]})])
         style.configure("TCombobox",fieldbackground=CARD,background=CARD,foreground=TEXT,arrowcolor=MUTED,
-                        bordercolor="#42425e",padding=6)
+                        bordercolor=CARD,lightcolor=CARD,darkcolor=CARD,padding=6,arrowsize=14)
         style.map("TCombobox",fieldbackground=[("readonly",CARD)],foreground=[("readonly",TEXT)])
-        style.configure("Vertical.TScrollbar",background="#42425e",troughcolor=BG,arrowcolor=MUTED,borderwidth=0)
+        style.configure("Vertical.TScrollbar",background=BORDER,troughcolor=BG,arrowcolor=MUTED,borderwidth=0,lightcolor=BORDER,darkcolor=BORDER,bordercolor=BG,width=8,arrowsize=8,gripcount=0)
+        style.map("Vertical.TScrollbar",background=[("active",MUTED),("!active",BORDER)])
+
+        style.configure("TNotebook",background=BG,borderwidth=0,bordercolor=BORDER,lightcolor=BG,darkcolor=BG)
+        style.configure("TNotebook.Tab",background=CARD,foreground=MUTED,padding=(14,10),bordercolor=BORDER,lightcolor=BORDER,darkcolor=BORDER)
+        style.map("TNotebook.Tab",background=[("selected",SELECTED)],foreground=[("selected",TEXT)],padding=[("selected",(14,10))])
+        style.configure("TEntry",fieldbackground=CARD,foreground=TEXT,insertcolor=ACCENT,padding=7,bordercolor=BORDER,lightcolor=BORDER,darkcolor=BORDER)
+        self.option_add("*TCombobox*Listbox.background",CARD)
+        self.option_add("*TCombobox*Listbox.foreground",TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground",SELECTED)
+
+    def _shortcut(self, view: str) -> str:
+        if self.current_view != view:
+            self.show_view(view)
+        if view == "search": self.search_entry.focus_set()
+        elif view == "capture": self.note.focus_set()
+        return "break"
+
+    def _save_shortcut(self, event: tk.Event | None = None) -> str:
+        if self.current_view == "capture": self._save_capture()
+        elif self.current_view == "settings": self._save_settings()
+        return "break"
 
     def _build(self) -> None:
-        sidebar = tk.Frame(self,bg="#141425",width=64)
+        sidebar = tk.Frame(self,bg=SIDEBAR,width=210)
         sidebar.pack(side="left",fill="y")
         sidebar.pack_propagate(False)
-        logo = tk.Canvas(sidebar,width=64,height=78,bg="#141425",highlightthickness=0)
-        logo.pack()
-        logo.create_polygon(15,23,22,31,42,31,49,23,47,53,32,65,17,53,fill=ACCENT,smooth=True)
-        for x in (24,40):
-            logo.create_oval(x-7,34,x+7,48,fill="#141425",outline="")
-            logo.create_oval(x-2,38,x+2,44,fill=TEXT,outline="")
+        brand = tk.Frame(sidebar,bg=SIDEBAR,padx=18,pady=26)
+        brand.pack(fill="x")
+        label(brand,"OwlThread",20, TEXT,True).pack(anchor="w")
+        label(brand,"Your personal memory",10,MUTED).pack(anchor="w",pady=(5,0))
+        button(sidebar,"+  New capture",lambda:self.show_view("capture"),True).pack(fill="x",padx=14,pady=(2,24))
+        label(sidebar,"   Workspace",9,MUTED,True).pack(fill="x",padx=12,pady=(0,8))
         self.nav: dict[str,tk.Button] = {}
-        for key,symbol,title in (("feed","≡","Feed"),("search","⌕","Search"),("quadrants","▦","Memory"),("primer","ϟ","Ask"),("capture","+","Capture"),("integrations","⎈","Connect"),("settings","⚙","Settings")):
-            nav = tk.Button(sidebar,text=symbol+"\n"+title,command=lambda k=key:self.show_view(k),bg="#141425",fg=MUTED,
-                            activebackground="#2b2a48",activeforeground=TEXT,font=("Segoe UI",10),relief="flat",pady=12,cursor="hand2")
-            nav.pack(side="bottom" if key=="settings" else "top",fill="x",pady=3)
+        for key,title in (("feed","Overview"),("search","Search"),("quadrants","Memory library"),("primer","Ask OwlThread"),("capture","Capture a note"),("integrations","Connections"),("settings","Settings")):
+            nav = button(sidebar,title,lambda k=key:self.show_view(k))
+            nav.configure(bg=SIDEBAR,anchor="w",font=("Segoe UI",11),padx=16,pady=7)
+            nav.pack(side="bottom" if key=="settings" else "top",fill="x",padx=10,pady=2)
             self.nav[key] = nav
+        label(sidebar,"Ctrl+K   Search\nCtrl+N   New capture",9,MUTED).pack(side="bottom",fill="x",padx=24,pady=20)
         container = tk.Frame(self,bg=BG)
-        container.pack(side="left",fill="both",expand=True,padx=34,pady=26)
+        container.pack(side="left",fill="both",expand=True,padx=26,pady=24)
         header = tk.Frame(container,bg=BG)
-        header.pack(fill="x",pady=(0,24))
-        label(header,"OWLTHREAD  /  PERSONAL MEMORY",9,MUTED,True).pack(side="left")
+        header.pack(fill="x",pady=(0,16))
+        label(header,"Your workspace",10,MUTED).pack(side="left")
         self.project_menu = ttk.Combobox(header,textvariable=self.project,values=[p["name"] for p in self._projects],width=20)
         self.project_menu.pack(side="right")
         self.project_menu.bind("<<ComboboxSelected>>",self._project_changed)
         self.project_menu.bind("<Return>",self._project_changed)
         label(header,"Project   ",9,MUTED).pack(side="right")
-        transfer = tk.Frame(container,bg=CARD,padx=14,pady=10)
-        transfer.pack(fill="x",pady=(0,18))
+        transfer = RoundedFrame(container,bg=CARD,padx=18,pady=12)
+        transfer.pack(fill="x",pady=(0,20))
         button(transfer,"Browser setup",lambda:self.show_view("settings")).pack(side="right",padx=(12,0))
-        self.browser_status = label(transfer,"Checking browser connection…",10,MUTED)
-        self.browser_status.pack(fill="x")
+        self.browser_status = label(transfer,"Checking browser connection…",9,MUTED)
+        self.browser_status.pack(fill="x",expand=True)
         self.browser_status.bind("<Configure>",lambda event:self.browser_status.configure(wraplength=max(180,event.width)))
         self.page = tk.Frame(container,bg=BG)
-        self.footer = label(container,"Local storage  ·  No telemetry  ·  Ctrl+Shift+P for context",9,MUTED)
+        self.footer = label(container,"Saved on this device  ·  Ctrl+Shift+P for quick context",9,MUTED)
         self.footer.pack(side="bottom",fill="x",pady=(14,0))
         self.page.pack(fill="both",expand=True)
 
     def _project_changed(self, event: tk.Event | None = None) -> None:
+        self._remember_draft()
         name = self.project.get().strip() or "General"
         self.project.set(name)
         def work() -> Any:
@@ -191,6 +223,8 @@ class OwlThreadApp(tk.Tk):
         self._captures,self._capture_status,self._transfer_status=data["captures"],data["capture_status"],data["transfer_status"]
         self.project_menu.configure(values=[p["name"] for p in self._projects])
         self._update_browser_status()
+        if self.current_view == "capture" and getattr(self,"_note_project",None) != self.project.get():
+            self.show_view("capture")
         if changed and self.current_view in {"feed","quadrants"}:
             position=self._scrolls[0].canvas.yview()[0] if self._scrolls else 0
             self.show_view(self.current_view)
@@ -213,7 +247,7 @@ class OwlThreadApp(tk.Tk):
             state="Browser capture paused · resume in Settings"
             color="#f59e0b"
         elif status.get("http_listener",{}).get("running"):
-            state=f"Browser receiver ready · port {status['http_listener'].get('port') or self.port}"
+            state="Browser capture ready"
             if not status.get("authorized_browser_count",0):
                 state+=" · pair your extension"
             color="#62d6ad"
@@ -221,7 +255,7 @@ class OwlThreadApp(tk.Tk):
             state="Browser receiver unavailable · local port is already in use"
             color="#f59e0b"
         else:
-            state="Browser receiver stopped"
+            state="Browser capture is offline · open Browser setup to connect"
         received=self._capture_status.get("last_browser_capture_at")
         state+="\n"+(f"Last browser capture {_relative_time(received)}" if received else "No browser captures received in this project yet")
         state+=f" · {self._capture_status.get('pending_captures',0)} waiting to extract"
@@ -241,10 +275,10 @@ class OwlThreadApp(tk.Tk):
         self._job(run,done)
 
     def _heading(self, title: str, subtitle: str) -> None:
-        label(self.page,title,28,bold=True).pack(fill="x",pady=(0,8))
+        label(self.page,title,26,bold=True).pack(fill="x",pady=(0,8))
         description=label(self.page,subtitle,11,MUTED)
         description.configure(wraplength=760)
-        description.pack(fill="x",pady=(0,24))
+        description.pack(fill="x",pady=(0,18))
         description.bind("<Configure>",lambda event:description.configure(wraplength=max(180,event.width)))
 
     def _scroll(self, master: tk.Misc | None = None) -> ScrollFrame:
@@ -253,9 +287,18 @@ class OwlThreadApp(tk.Tk):
         self._scrolls.append(scroll)
         return scroll
 
+    def _remember_draft(self) -> None:
+        if self.current_view == "capture" and hasattr(self,"note") and self.note.winfo_exists():
+            self._note_drafts[self._note_project] = self.note.get("1.0","end-1c")
+        if self.current_view == "settings" and hasattr(self,"prompt_fields"):
+            self._settings_draft = self._settings_values()
+        if self.current_view == "search" and hasattr(self,"search_query"):
+            self._search_text = self.search_query.get()
+
     def show_view(self, key: str) -> None:
         if self._closing:
             return
+        self._remember_draft()
         aliases = {"live_feed":"feed","quick_dump":"capture","vault":"quadrants","sites":"settings"}
         key = aliases.get(key,key)
         self.current_view = key
@@ -266,19 +309,34 @@ class OwlThreadApp(tk.Tk):
         for child in self.page.winfo_children():
             child.destroy()
         self._scrolls.clear()
-        for name,nav in self.nav.items():
-            nav.configure(bg="#2c2b4a" if name==key else "#141425",fg=ACCENT if name==key else MUTED)
+        self._set_navigation(key)
         self.views[key] = self.page
         getattr(self,"_view_"+key)()
+        self._bind_editor_shortcuts(self.page)
+
+    def _bind_editor_shortcuts(self, parent: tk.Misc) -> None:
+        # Handle shortcuts before Tk's editing bindings (Ctrl+K deletes text).
+        for widget in parent.winfo_children():
+            if isinstance(widget,(tk.Text,tk.Entry,ttk.Entry)):
+                widget.bind("<Control-k>",lambda _:self._shortcut("search"))
+                widget.bind("<Control-n>",lambda _:self._shortcut("capture"))
+                widget.bind("<Control-s>",self._save_shortcut)
+            self._bind_editor_shortcuts(widget)
+
+    def _set_navigation(self, key: str) -> None:
+        key = {"captures":"feed","pending":"feed","quadrant":"quadrants"}.get(key,key)
+        for name,nav in self.nav.items():
+            nav.configure(bg=SELECTED if name==key else SIDEBAR,fg=TEXT if name==key else MUTED,
+                          font=("Segoe UI",11,"bold" if name==key else "normal"))
 
     def _view_feed(self) -> None:
-        self._heading("Your work, remembered.","Browser conversations arrive as raw captures. Extract them into lasting memories when ready.")
+        self._heading("Overview","Your recent captures and saved memories, together in one place.")
         stats = tk.Frame(self.page,bg=BG)
         stats.pack(fill="x",pady=(0,22))
         count = self._counts[0]
         label(stats,f"{count} active memories",13,bold=True).pack(side="left")
         label(stats,f"   ·   {self._counts[1]} waiting to extract",10,MUTED).pack(side="left")
-        button(stats,"Extract now",lambda:self._job(self.primer_engine.pipeline.handle_done_signal,self._flush_done)).pack(side="right")
+        button(stats,"Extract now",lambda:self._job(self.primer_engine.pipeline.handle_done_signal,self._flush_done),True).pack(side="right")
         button(stats,"Raw captures",self._view_captures).pack(side="right",padx=6)
         self.feed_scroll = self._scroll().content
         self.refresh_feed()
@@ -287,8 +345,9 @@ class OwlThreadApp(tk.Tk):
         for child in self.page.winfo_children(): child.destroy()
         self._scrolls.clear()
         self.current_view="pending"
+        self._set_navigation("pending")
         self._heading("Pending captures","Raw captures stay local until extraction succeeds. Failed items can be retried.")
-        button(self.page,"← Feed",lambda:self.show_view("feed")).pack(anchor="w",pady=(0,8))
+        button(self.page,"← Overview",lambda:self.show_view("feed")).pack(anchor="w",pady=(0,8))
         button(self.page,"Retry extraction",lambda:self._job(self.primer_engine.pipeline.handle_done_signal,self._flush_done)).pack(anchor="w",pady=(0,12))
         pane=self._scroll().content
         for row in getattr(self,"_pending",[]):
@@ -299,11 +358,12 @@ class OwlThreadApp(tk.Tk):
         for child in self.page.winfo_children(): child.destroy()
         self._scrolls.clear()
         self.current_view="captures"
+        self._set_navigation("captures")
         self._view_revision+=1
         self._heading("Raw captures",f"{self._capture_status.get('total_captures',0)} received in {self.project.get()} · newest 100 shown. Raw text remains local after extraction.")
         actions=tk.Frame(self.page,bg=BG)
         actions.pack(fill="x",pady=(0,14))
-        button(actions,"← Feed",lambda:self.show_view("feed")).pack(side="left")
+        button(actions,"← Overview",lambda:self.show_view("feed")).pack(side="left")
         button(actions,"Pending only",self._view_pending).pack(side="left",padx=8)
         button(actions,"Extract now",lambda:self._job(self.primer_engine.pipeline.handle_done_signal,self._flush_done)).pack(side="right")
         pane=self._scroll().content
@@ -316,10 +376,10 @@ class OwlThreadApp(tk.Tk):
         for child in self.feed_scroll.winfo_children():
             child.destroy()
         if self._captures:
-            label(self.feed_scroll,"RECENT RAW CAPTURES",10,ACCENT,True).pack(fill="x",pady=(0,10))
+            label(self.feed_scroll,"Recent captures",11,TEXT,True).pack(fill="x",pady=(0,10))
             for row in self._captures[:3]:
                 CaptureCard(self.feed_scroll,row).pack(fill="x",pady=(0,10))
-            label(self.feed_scroll,"EXTRACTED MEMORIES",10,ACCENT,True).pack(fill="x",pady=(12,10))
+            label(self.feed_scroll,"Saved memories",11,TEXT,True).pack(fill="x",pady=(12,10))
         rows = self._rows[:100]
         if not rows and self._captures:
             label(self.feed_scroll,"Your captures are saved. Use Extract now to turn decisions and useful details into memories.",11,MUTED).pack(fill="x",pady=12)
@@ -328,7 +388,7 @@ class OwlThreadApp(tk.Tk):
 
     def _cards(self, master: tk.Misc, rows: list[dict[str,Any]]) -> None:
         if not rows:
-            frame = tk.Frame(master,bg=CARD,padx=30,pady=40)
+            frame = RoundedFrame(master,bg=CARD,padx=30,pady=32)
             frame.pack(fill="x")
             label(frame,"A little context goes a long way.",18,bold=True).pack(fill="x")
             label(frame,"Capture a note or conversation, then extract it into lasting memory.\nYour first decision will appear here.",11,MUTED).pack(fill="x",pady=(12,20))
@@ -343,10 +403,16 @@ class OwlThreadApp(tk.Tk):
         self._entry_action(entry_id,"archive")
 
     def _view_search(self) -> None:
-        self._heading("Find the thread.","Search decisions, constraints and the details behind them.")
-        self.search_query = tk.StringVar()
-        entry = tk.Entry(self.page,textvariable=self.search_query,bg=CARD,fg=TEXT,insertbackground=ACCENT,font=("Segoe UI",14),relief="flat")
-        entry.pack(fill="x",ipady=13,pady=(0,20))
+        self._heading("Search your memory","Find a decision, constraint or detail in the current project.")
+        label(self.page,"Search by keyword or phrase",10,MUTED).pack(anchor="w",pady=(0,8))
+        self.search_query = tk.StringVar(value=self._search_text)
+        search_box = RoundedFrame(self.page,bg=CARD,padx=18,pady=14)
+        search_box.pack(fill="x",pady=(0,12))
+        entry = tk.Entry(search_box,textvariable=self.search_query,bg=CARD,fg=TEXT,insertbackground=ACCENT,font=("Segoe UI",14),relief="flat")
+        self.search_entry = entry
+        entry.pack(fill="x")
+        self.search_notice = label(self.page,"",10,MUTED)
+        self.search_notice.pack(fill="x",pady=(0,12))
         self.search_results = self._scroll().content
         def changed(*_: Any) -> None:
             if self._search_id:
@@ -363,23 +429,32 @@ class OwlThreadApp(tk.Tk):
         for widget in self.search_results.winfo_children():
             widget.destroy()
         query,pid,revision=self.search_query.get(),self._pid(),self._view_revision
+        self.search_notice.configure(text="Searching…")
         def done(rows: Any) -> None:
             if self.current_view=="search" and self._view_revision==revision and self.search_query.get()==query:
-                self._cards(self.search_results,rows)
+                self.search_notice.configure(text=f"{len(rows)} results" if query.strip() else "Recent memories · type above to search")
+                if not rows and query.strip():
+                    label(self.search_results,"No matching memories",17,bold=True).pack(anchor="w",pady=(18,8))
+                    label(self.search_results,"Try fewer words or choose another project.",11,MUTED).pack(anchor="w")
+                    button(self.search_results,"Clear search",lambda:self.search_query.set("")).pack(anchor="w",pady=16)
+                else:
+                    self._cards(self.search_results,rows)
         self._job(lambda:MemorySearcher(self.db).search(query,limit=30,project_id=pid),done)
 
     def _view_quadrants(self) -> None:
-        self._heading("The shape of your memory.","Four perspectives. One shared understanding.")
+        self._heading("Memory library","Browse saved knowledge by category.")
         grid = self._scroll().content
         for index,(quadrant,color) in enumerate(QUADRANT_COLORS.items()):
-            grid.columnconfigure(index,weight=1,uniform="quadrants")
-            col = tk.Frame(grid,bg=CARD,padx=14,pady=20)
-            col.grid(row=0,column=index,sticky="nsew",padx=(0,10))
+            grid.columnconfigure(index % 2,weight=1,uniform="quadrants")
+            col = RoundedFrame(grid,bg=CARD,padx=22,pady=22)
+            col.grid(row=index // 2,column=index % 2,sticky="nsew",padx=(0,10),pady=(0,12))
             title = quadrant.replace("_"," ").title()
             heading = label(col,"● "+title,11,color,True)
             heading.configure(wraplength=145)
             heading.pack(fill="x")
-            for row in [r for r in self._rows if r["quadrant"]==quadrant][:5]:
+            matches = [r for r in self._rows if r["quadrant"]==quadrant]
+            label(col,f"{len(matches)} {'memory' if len(matches)==1 else 'memories'}",10,MUTED).pack(fill="x",pady=(8,0))
+            for row in matches[:2]:
                 item = label(col,f"#{row['id']}\n{row['summary']}",11)
                 item.configure(wraplength=145)
                 item.pack(fill="x",pady=15)
@@ -392,6 +467,7 @@ class OwlThreadApp(tk.Tk):
 
     def _show_quadrant(self, quadrant: str) -> None:
         self.current_view="quadrant"
+        self._set_navigation("quadrant")
         self._active_quadrant=quadrant
         self._view_revision+=1
         for child in self.page.winfo_children():
@@ -408,29 +484,59 @@ class OwlThreadApp(tk.Tk):
         self._panels = getattr(self,"_panels",[])+[self.primer_panel]
 
     def _view_capture(self) -> None:
-        self._heading("Keep what matters.","Add a note, a decision or a conversation to your local capture buffer.")
-        self.note = tk.Text(self.page,bg=CARD,fg=TEXT,insertbackground=ACCENT,wrap="word",font=("Segoe UI",12),relief="flat",padx=20,pady=20)
-        self.note.pack(fill="both",expand=True,pady=(0,20))
-        button(self.page,"Save capture",self._save_capture,True).pack(anchor="e")
+        self._heading("Capture a note","Save a decision, useful detail or conversation to this project.")
+        self._note_project = self.project.get()
+        label(self.page,"Your note",10,MUTED,True).pack(anchor="w",pady=(0,8))
+        editor = RoundedFrame(self.page,bg=CARD,padx=18,pady=18)
+        self.note = tk.Text(editor,bg=CARD,fg=TEXT,insertbackground=ACCENT,wrap="word",font=("Segoe UI",12),relief="flat",padx=0,pady=0)
+        self.note.insert("1.0",self._note_drafts.get(self._note_project,""))
+        actions = tk.Frame(self.page,bg=BG)
+        actions.pack(side="bottom",fill="x")
+        editor.pack(fill="both",expand=True,pady=(0,16))
+        self.note.pack(fill="both",expand=True)
+        label(actions,"Saved locally · extract into memories from Overview",9,MUTED).pack(side="left")
+        self.save_capture_button = button(actions,"Save capture",self._save_capture,True)
+        self.save_capture_button.pack(side="right")
+        self.save_capture_button.configure(state="disabled" if self._saving_capture else "normal")
+        self.note.focus_set()
 
     def _save_capture(self) -> None:
+        if self._saving_capture: return
         text = self.note.get("1.0","end").strip()
+        if not text:
+            self.footer.configure(text="Write or paste a note before saving.",fg="#f59e0b")
+            self.note.focus_set()
+            return
         if text:
-            name=self.project.get()
-            revision=self._view_revision
+            name=self._note_project
+            self._saving_capture = True
+            self.save_capture_button.configure(state="disabled",text="Saving…")
             def done(_: Any) -> None:
-                if self.current_view=="capture" and self._view_revision==revision and self.note.get("1.0","end").strip()==text:
+                self._saving_capture = False
+                if self._note_drafts.get(name,"").strip() == text: self._note_drafts.pop(name,None)
+                if self.current_view=="capture" and self.save_capture_button.winfo_exists():
+                    self.save_capture_button.configure(state="normal",text="Save capture")
+                if self.current_view=="capture" and self._note_project==name and self.note.get("1.0","end").strip()==text:
                     self.note.delete("1.0","end")
-                self.footer.configure(text="Capture saved locally. Choose Extract now or type done in Primer.",fg="#62d6ad")
-            self._mutate(lambda:self.db.insert_capture(text,"manual",self.db.get_or_create_project(name)),done)
+                self.footer.configure(text="Capture saved. Open Overview and choose Extract now to create memories.",fg="#62d6ad")
+            def work() -> Any:
+                self.db.insert_capture(text,"manual",self.db.get_or_create_project(name))
+                return self._snapshot(name)
+            def saved(data: Any) -> None:
+                self._apply_snapshot(data)
+                done(None)
+            def failed() -> None:
+                self._saving_capture = False
+                if self.current_view=="capture": self.save_capture_button.configure(state="normal",text="Save capture")
+            if not self._job(work,saved,on_error=failed): failed()
 
     def _view_integrations(self) -> None:
-        """Built-in read connectors plus honest availability for the remaining catalog."""
+        """Cloudflare and GitHub setup; other integrations are previews only."""
         from owlthread.integrations.registry import IntegrationRegistry
         from owlthread.integrations.context import ContextConnectorService
-        self._heading("Bring your tools into context.","Cloudflare and GitHub read connectors are included. Choose what to import into this project.")
+        self._heading("Connections","Bring context from your tools into this project.")
         intro = label(self.page,
-            "Set up a provider token, test access, then import context. Imported text is available to search and Ask immediately; extraction turns it into lasting memories. Each connection belongs to the project selected during setup.",
+            "Sign in, choose an account or repository, then import. Context is saved to the project selected when sign-in begins.",
             10,MUTED)
         intro.configure(wraplength=760,justify="left")
         intro.pack(fill="x",pady=(0,16))
@@ -440,28 +546,153 @@ class OwlThreadApp(tk.Tk):
         self.integration_fields: dict[str,dict[str,Any]]={}
         for integration_id in ("cloudflare","github"):
             self._connector_card(pane,service.status(integration_id))
-        label(pane,"OTHER INTEGRATION DEFINITIONS",10,ACCENT,True).pack(fill="x",pady=(18,8))
-        note=label(pane,"These definitions describe permissions. They require an adapter and provider authentication before they can supply context.",10,MUTED)
+        label(pane,"MORE TOOLS",10,ACCENT,True).pack(fill="x",pady=(18,8))
+        note=label(pane,"Cloudflare and GitHub are available above. Other integrations are coming soon.",10,MUTED)
         note.configure(wraplength=760)
         note.pack(fill="x",pady=(0,14))
         for item in registry.list():
             if item["id"] in {"cloudflare","github"}: continue
-            card = tk.Frame(pane,bg=CARD,padx=16,pady=14)
+            card = RoundedFrame(pane,bg=CARD,padx=22,pady=20)
             card.pack(fill="x",pady=(0,10))
             top = tk.Frame(card,bg=CARD)
             top.pack(fill="x")
             label(top,item["name"],13,bold=True).pack(side="left")
-            state = "Prepared · not connected" if item["enabled"] else "Available · disabled"
-            label(top,state,9,"#62d6ad" if item["enabled"] else MUTED).pack(side="right")
-            label(card,f"{item['category']} · {str(item['connector_type']).upper()}\n{item['description']}",10,MUTED).pack(fill="x",pady=(7,8))
-            configured = item.get("configured_scopes") or []
-            if configured:
-                label(card,"Project grant: "+", ".join(configured),9,ACCENT).pack(fill="x",pady=(0,8))
-            action = (lambda integration_id=item["id"]: self._set_integration_read_access(integration_id,False)) if item["enabled"] else \
-                     (lambda integration_id=item["id"]: self._set_integration_read_access(integration_id,True))
-            button(card,"Disable grant" if item["enabled"] else "Prepare read-only",action).pack(anchor="e")
+            label(top,"Coming soon",9,ACCENT).pack(side="right")
+            description=label(card,f"{item['category']}\n{item['description']}",10,MUTED)
+            description.configure(wraplength=760)
+            description.pack(fill="x",pady=(7,8))
+            description.bind("<Configure>",lambda event,w=description:w.configure(wraplength=max(180,event.width)))
 
     def _connector_card(self, pane: tk.Frame, item: dict[str,Any]) -> None:
+        provider=item["id"]
+        card=RoundedFrame(pane,bg=CARD,padx=22,pady=20)
+        card.pack(fill="x",pady=(0,12))
+        label(card,item["name"],15,bold=True).pack(fill="x")
+        text="Sign in to choose your Cloudflare account. Context reads never change your resources." if provider=="cloudflare" else "Sign in to choose a public repository. Private repositories can use a restricted token in Advanced."
+        label(card,text,10,MUTED).pack(fill="x",pady=(7,8))
+        row=tk.Frame(card,bg=CARD);row.pack(fill="x")
+        connect=button(row,"Sign in with "+item["name"],lambda:self._begin_browser_login(provider),True)
+        connect.pack(side="left",padx=(0,8))
+        reopen=button(row,"Open browser again",lambda:self._reopen_browser_login(provider))
+        cancel=button(row,"Cancel",lambda:self.login_service.cancel(provider))
+        notice=label(card,"Ready to connect.",10,MUTED);notice.pack(fill="x",pady=(10,8))
+        notice.bind("<Configure>",lambda event,w=notice:w.configure(wraplength=max(180,event.width)))
+        choice=tk.StringVar()
+        resources=ttk.Combobox(card,textvariable=choice,state="readonly")
+        resources.pack(fill="x",pady=(0,8))
+        actions=tk.Frame(card,bg=CARD);actions.pack(fill="x")
+        import_button=button(actions,"Use selected account and import" if provider=="cloudflare" else "Use selected repository and import",lambda:self._import_browser_context(provider))
+        import_button.pack(side="left",padx=(0,8))
+        button(actions,"Disconnect",lambda:self._disconnect_browser_login(provider)).pack(side="left")
+        self._browser_fields[provider]={"choice":choice,"resources":resources,"notice":notice,"connect":connect,"reopen":reopen,"cancel":cancel,"import":import_button,"resource_map":{},"signature":None}
+        if provider=="github" and not self.login_service.client_id():
+            setup=tk.Frame(card,bg=CARD);setup.pack(fill="x",pady=(12,0))
+            label(setup,"One-time app setup: register OwlThread with GitHub and enable Device Flow.",10,MUTED).pack(fill="x")
+            setup_row=tk.Frame(setup,bg=CARD);setup_row.pack(fill="x",pady=(6,0))
+            button(setup_row,"Set up GitHub sign-in",lambda:self._open_github_registration()).pack(side="left",padx=(0,8))
+            client_id=tk.StringVar()
+            ttk.Entry(setup_row,textvariable=client_id,width=24).pack(side="left",padx=(0,8))
+            button(setup_row,"Save Client ID",lambda:self._save_github_client(client_id.get())).pack(side="left")
+        advanced=tk.Frame(card,bg=CARD)
+        def toggle():
+            opened=not self._connector_advanced_open.get(provider,False)
+            self._connector_advanced_open[provider]=opened
+            if opened: advanced.pack(fill="x",pady=(8,0))
+            else: advanced.pack_forget()
+        button(card,"Advanced · use an API token",toggle).pack(anchor="w",pady=(12,0))
+        self._token_connector_card(advanced,item)
+        if self._connector_advanced_open.get(provider,False): advanced.pack(fill="x",pady=(8,0))
+        self._poll_browser_logins()
+
+    def _open_github_registration(self) -> None:
+        import webbrowser
+        webbrowser.open("https://github.com/settings/applications/new")
+        self.footer.configure(text="Register OwlThread, enable Device Flow, then paste its public Client ID here. No client secret is needed.")
+
+    def _save_github_client(self, client_id: str) -> None:
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{10,128}",client_id.strip()):
+            self.footer.configure(text="Paste the public Client ID from your OwlThread GitHub app.",fg="#f59e0b");return
+        self._mutate(lambda:self.db.set_setting("github_oauth_client_id",client_id.strip()),lambda _:self.show_view("integrations"))
+
+    def _begin_browser_login(self, provider: str) -> None:
+        project=self.project.get()
+        def work():
+            return self.login_service.begin(provider,self.db.get_or_create_project(project))
+        def done(result): self._poll_browser_logins()
+        def failed():
+            self.footer.configure(text="GitHub needs its registered Client ID; otherwise check your connection and try again.",fg="#f59e0b")
+        self._job(work,done,on_error=failed)
+
+    def _reopen_browser_login(self, provider: str) -> None:
+        import webbrowser
+        session=self.login_service.status(provider).get("session") or {}
+        if session.get("state") in {"starting","waiting"} and session.get("browser_url"): webbrowser.open(session["browser_url"])
+
+    def _poll_browser_logins(self) -> None:
+        if self._login_tick_id:
+            self.after_cancel(self._login_tick_id);self._login_tick_id=None
+        if self._closing: return
+        for provider,fields in self._browser_fields.items():
+            if not fields["notice"].winfo_exists(): continue
+            status=self.login_service.status(provider)
+            session=status.get("session") or {}
+            pending=session.get("state") in {"starting","waiting","discovering"}
+            fields["connect"].configure(state="disabled" if pending or not status["browser_login_available"] else "normal")
+            if pending:
+                fields["cancel"].pack(side="left",padx=(0,8))
+                if session.get("browser_url"): fields["reopen"].pack(side="left",padx=(0,8))
+            else: fields["cancel"].pack_forget();fields["reopen"].pack_forget()
+            message=session.get("message") or ("Signed in as "+status["label"]+". Choose a resource to import." if status["signed_in"] else "Ready to connect." if status["browser_login_available"] else "GitHub app registration is required once before browser sign-in.")
+            fields["notice"].configure(text=message,fg="#f59e0b" if session.get("state")=="error" else MUTED)
+            items=status["resources"] if status["signed_in"] else []
+            signature=repr(items)
+            if fields["signature"]!=signature:
+                fields["signature"]=signature
+                selected_id=fields["resource_map"].get(fields["choice"].get())
+                counts: dict[str,int]={}
+                for resource in items:
+                    name=str(resource["label"])
+                    counts[name]=counts.get(name,0)+1
+                choices: dict[str,str]={}
+                for resource in items:
+                    name=str(resource["label"])
+                    display=f"{name} ({resource['id']})" if counts[name]>1 else name
+                    # Provider account names need not be unique, including names
+                    # that already look like a generated disambiguation label.
+                    original=display
+                    duplicate=2
+                    while display in choices:
+                        display=f"{original} · {duplicate}"
+                        duplicate+=1
+                    choices[display]=resource["id"]
+                fields["resource_map"]=choices
+                fields["resources"].configure(values=list(fields["resource_map"]))
+                selected=next((name for name,resource_id in choices.items() if resource_id==selected_id),None)
+                fields["choice"].set(selected or (next(iter(choices)) if len(choices)==1 else ""))
+            fields["import"].configure(state="normal" if items and not pending else "disabled")
+        if self.current_view=="integrations": self._login_tick_id=self.after(400,self._poll_browser_logins)
+
+    def _import_browser_context(self, provider: str) -> None:
+        fields=self._browser_fields[provider]
+        resource=fields["resource_map"].get(fields["choice"].get())
+        if not resource:
+            fields["notice"].configure(text="Choose an account or repository first.",fg="#f59e0b");return
+        fields["notice"].configure(text="Importing context…")
+        def work():
+            try: return self.login_service.select(provider,resource)
+            except Exception: return {"ok":False,"error":"Could not import context. Check your sign-in permissions and try again."}
+        def done(result):
+            self.footer.configure(text=f"Imported {result.get('imported_count',0)} captures into your connection's project." if result.get("ok") else result["error"],fg="#62d6ad" if result.get("ok") else "#f59e0b")
+            self._request_refresh()
+        self._job(work,done)
+
+    def _disconnect_browser_login(self, provider: str) -> None:
+        from owlthread.integrations.context import ContextConnectorService
+        self.login_service.cancel(provider)
+        self._mutate(lambda:ContextConnectorService(self.db).disconnect(provider),lambda _:self.show_view("integrations"))
+
+    def _token_connector_card(self, pane: tk.Frame, item: dict[str,Any]) -> None:
         integration_id=item["id"]
         card=tk.Frame(pane,bg=CARD,padx=16,pady=16)
         card.pack(fill="x",pady=(0,12))
@@ -493,7 +724,8 @@ class OwlThreadApp(tk.Tk):
             tk.Entry(resource,textvariable=var,bg="#19192d",fg=TEXT,insertbackground=ACCENT,relief="flat",font=("Segoe UI",11)).pack(fill="x",ipady=7)
         label(card,"API token · leave empty to keep the saved token" if item.get("credential_stored") else "API token",10).pack(fill="x",pady=(10,4))
         fields["token"]=tk.StringVar(value="")
-        tk.Entry(card,textvariable=fields["token"],show="•",bg="#19192d",fg=TEXT,insertbackground=ACCENT,relief="flat",font=("Segoe UI",11)).pack(fill="x",ipady=7)
+        fields["token_widget"]=tk.Entry(card,textvariable=fields["token"],show="•",bg="#19192d",fg=TEXT,insertbackground=ACCENT,relief="flat",font=("Segoe UI",11))
+        fields["token_widget"].pack(fill="x",ipady=7)
         help_text="Use a Cloudflare API token scoped to this account: Zone Read, DNS Read, Workers Scripts Read, or Pages Read for the options you select." if integration_id=="cloudflare" else "Use a GitHub fine-grained token limited to this repository with Metadata, Issues, and Pull requests read access as needed."
         hint=label(card,help_text,9,MUTED)
         hint.configure(wraplength=760)
@@ -530,6 +762,7 @@ class OwlThreadApp(tk.Tk):
             fields["buttons"].append(control)
 
     def _integration_action(self, integration_id: str, operation: str) -> None:
+        if operation in {"save","disconnect"}: self.login_service.cancel(integration_id)
         from owlthread.integrations.context import ContextConnectorService
         fields=self.integration_fields[integration_id]
         notice=fields["notice"]
@@ -593,8 +826,21 @@ class OwlThreadApp(tk.Tk):
         self._mutate(lambda:IntegrationRegistry(self.db).configure(integration_id,enabled=enabled,scopes=read_scopes,project_id=pid),done)
 
     def _view_settings(self) -> None:
-        self._heading("Make yourself at home.","Local by default. Configure the tools that work for you.")
-        pane = self._scroll().content
+        self._heading("Settings","Manage your browser connection, AI provider and capture preferences.")
+        save_bar = tk.Frame(self.page,bg=BG)
+        save_bar.pack(side="bottom",fill="x",pady=(12,0))
+        label(save_bar,"Changes apply when you save.  ·  Ctrl+S",9,MUTED).pack(side="left")
+        button(save_bar,"Save settings",self._save_settings,True).pack(side="right")
+        tabs = SegmentedTabs(self.page)
+        tabs.pack(fill="both",expand=True)
+        sections = {}
+        for title in ("Browser", "AI model", "Capture", "Advanced"):
+            frame = tk.Frame(tabs,bg=BG,padx=4,pady=16)
+            tabs.add(frame,text=title)
+            sections[title] = self._scroll(frame).content
+        self.settings_tabs = tabs
+        values = self._settings | self._settings_draft
+        pane = sections["Browser"]
         label(pane,"BROWSER CONNECTION",10,ACCENT,True).pack(fill="x",pady=(0,10))
         receiver=label(pane,f"Receiver: http://127.0.0.1:{self.port} · selected project: {self.project.get()}\nChoose this same project in the extension popup to see its captures here.",10,MUTED)
         receiver.configure(wraplength=760)
@@ -604,6 +850,7 @@ class OwlThreadApp(tk.Tk):
         browser_actions.pack(fill="x",pady=(10,20))
         button(browser_actions,"Copy pairing secret",self._copy_pairing_secret).pack(side="left",padx=(0,10))
         button(browser_actions,"Revoke browser connections",lambda:self._copy_pairing_secret(True)).pack(side="left")
+        pane = sections["AI model"]
         label(pane,"MODEL CONNECTION",10,ACCENT,True).pack(fill="x",pady=(0,10))
         privacy = label(pane,"Fallback and local Ollama keep context on this machine. A remote provider receives the context used for extraction and briefs.",10,MUTED)
         privacy.configure(wraplength=600)
@@ -613,45 +860,54 @@ class OwlThreadApp(tk.Tk):
         for key,title in (("llm_provider","Provider"),("llm_model","Model"),("llm_api_key","API key"),("llm_base_url","Base URL")):
             row = tk.Frame(pane,bg=BG)
             row.pack(fill="x",pady=6)
-            label(row,title,11).pack(side="left",fill="x")
-            var = tk.StringVar(value=self._settings.get(key,"fallback" if key=="llm_provider" else ""))
+            label(row,title,11).pack(anchor="w",pady=(0,6))
+            var = tk.StringVar(value=values.get(key,"fallback" if key=="llm_provider" else ""))
             self.setting_vars[key] = var
+            field = RoundedFrame(row,bg=CARD,radius=12,padx=12,pady=8)
+            field.pack(fill="x")
             if key=="llm_provider":
-                widget = ttk.Combobox(row,textvariable=var,values=list(DEFAULTS),state="readonly",width=48)
+                widget = ttk.Combobox(field,textvariable=var,values=list(DEFAULTS),state="readonly",width=48)
                 widget.bind("<<ComboboxSelected>>",self._provider_changed)
             else:
-                widget = tk.Entry(row,textvariable=var,bg=CARD,fg=TEXT,insertbackground=ACCENT,relief="flat",width=50,
+                widget = tk.Entry(field,textvariable=var,bg=CARD,fg=TEXT,insertbackground=ACCENT,relief="flat",width=50,
                                   show="•" if key=="llm_api_key" else "",font=("Segoe UI",11))
-            widget.pack(side="right",ipady=7)
+            widget.pack(fill="x",ipady=3)
         if "llm_api_key" in self.db.unavailable_secret_settings:
             label(pane,"Saved model key cannot be unlocked on this Windows account. Enter it again and save settings.",
                   10,"#f59e0b").pack(fill="x",pady=(6,10))
         self.connection_notice = label(pane,"",10,MUTED)
         self.connection_notice.pack(fill="x",pady=6)
         button(pane,"Test connection",self._test_connection).pack(anchor="e",pady=(0,24))
+        pane = sections["Advanced"]
         label(pane,"SYSTEM PROMPTS",10,ACCENT,True).pack(fill="x",pady=(0,12))
         self.prompt_fields: dict[str,tk.Text] = {}
         for key,title in (("extraction_prompt","Extraction instructions"),("primer_prompt","Primer instructions"),
                           ("page_context_prompt","On-demand page awareness"),
                           ("capture_importance_prompt","Legacy smart-capture gate (raw AI turns bypass this)")):
             label(pane,title,11).pack(fill="x",pady=(8,6))
-            text = tk.Text(pane,height=4,bg=CARD,fg=TEXT,insertbackground=ACCENT,wrap="word",relief="flat",padx=12,pady=10,font=("Segoe UI",10))
-            text.insert("1.0",self._settings.get(key,""))
+            prompt_box = RoundedFrame(pane,bg=CARD,padx=16,pady=12)
+            prompt_box.pack(fill="x")
+            text = tk.Text(prompt_box,height=4,bg=CARD,fg=TEXT,insertbackground=ACCENT,wrap="word",relief="flat",padx=0,pady=0,font=("Segoe UI",10))
+            text.insert("1.0",values.get(key,""))
             text.pack(fill="x")
             self.prompt_fields[key] = text
         label(pane,"Leave a prompt empty to restore the built-in instructions.",9,MUTED).pack(fill="x",pady=10)
-        self.paused = tk.BooleanVar(value=self._settings.get("capture_paused","false")=="true")
+        pane = sections["Capture"]
+        label(pane,"CAPTURE PREFERENCES",10,ACCENT,True).pack(fill="x",pady=(0,12))
+        self.paused = tk.BooleanVar(value=values.get("capture_paused","false")=="true")
         self.capture_options = {}
         for key,title,default in (("strict_site_isolation","Strict site isolation (disables origin-blind clipboard monitoring)","true"),
                                   ("clipboard_enabled","Read qualifying clipboard text (requires strict isolation off)","false"),
                                   ("ide_capture_enabled","Read local Cursor and VS Code chat stores (experimental)","false")):
-            var=tk.BooleanVar(value=self._settings.get(key,default)=="true")
+            var=tk.BooleanVar(value=values.get(key,default)=="true")
             self.capture_options[key]=var
-            tk.Checkbutton(pane,text=title,variable=var,bg=BG,fg=TEXT,selectcolor=CARD,activebackground=BG,activeforeground=TEXT).pack(anchor="w",pady=6)
+            control=tk.Checkbutton(pane,text=title,variable=var,bg=BG,fg=TEXT,selectcolor=CARD,activebackground=BG,activeforeground=TEXT,justify="left",anchor="w")
+            control.pack(fill="x",pady=6)
+            control.bind("<Configure>",lambda event,w=control:w.configure(wraplength=max(150,event.width-35)))
         label(pane,"Capture source changes apply after restarting OwlThread. Keep strict isolation on to guarantee blocked-site text cannot enter through the clipboard, which has no source URL.",9,MUTED).pack(fill="x",pady=6)
         tk.Checkbutton(pane,text="Pause browser, clipboard and IDE capture",variable=self.paused,bg=BG,fg=TEXT,selectcolor=CARD,
                        activebackground=BG,activeforeground=TEXT).pack(anchor="w",pady=10)
-        button(pane,"Save settings",self._save_settings,True).pack(anchor="e",pady=10)
+
 
     def _copy_pairing_secret(self, rotate: bool = False) -> None:
         from owlthread.security import local_token
@@ -666,11 +922,16 @@ class OwlThreadApp(tk.Tk):
         self.setting_vars["llm_model"].set(model)
         self.setting_vars["llm_api_key"].set("")
 
-    def _save_settings(self) -> None:
+    def _settings_values(self) -> dict[str,str]:
         values={key:var.get().strip() for key,var in self.setting_vars.items()}
         values.update({key:field.get("1.0","end").strip() for key,field in self.prompt_fields.items()})
         values["capture_paused"]="true" if self.paused.get() else "false"
         values.update({key:"true" if var.get() else "false" for key,var in self.capture_options.items()})
+        return values
+
+    def _save_settings(self) -> None:
+        values = self._settings_values()
+        self._settings_draft = values.copy()
         self._mutate(lambda:[self.db.set_setting(key,value) for key,value in values.items()],
             lambda _:self.footer.configure(text="Settings saved. New requests use this configuration.",fg="#62d6ad"))
 
@@ -755,7 +1016,7 @@ class OwlThreadApp(tk.Tk):
         if isinstance(event.widget,tk.Text):
             return
         for scroll in self._scrolls:
-            if scroll.winfo_exists():
+            if scroll.winfo_exists() and scroll.winfo_ismapped():
                 scroll.wheel(event)
                 break
 
@@ -763,6 +1024,7 @@ class OwlThreadApp(tk.Tk):
         if self._closing:
             return
         self._closing = True
+        self.login_service.close()
         if self._hotkey:
             self._hotkey.stop()
         if self.on_quit:
@@ -787,7 +1049,8 @@ class OwlThreadApp(tk.Tk):
 
     def destroy(self) -> None:
         self._closing=True
-        for task in (self._tick_id,self._refresh_id,self._search_id):
+        self.login_service.close()
+        for task in (self._tick_id,self._refresh_id,self._search_id,self._login_tick_id):
             if task:
                 self.after_cancel(task)
         super().destroy()

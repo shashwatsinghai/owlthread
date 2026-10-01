@@ -1,5 +1,9 @@
 # Verification report — 2026-09-14
 
+## Current follow-up: 1.7.0 — 2026-10-01
+
+See [browser sign-in verification](BROWSER-LOGIN-VERIFICATION-2026-10-01.md) for the Connect flow, registered GitHub device client, live public repository import/refresh, Coming soon placeholders, 226 Python tests and Windows build checks. The historical audit below retains its original evidence and limitations.
+
 ## Current follow-up: 1.6.0 — 2026-09-30
 
 See [the 1.6.0 verification report](VERIFICATION-2026-09-30.md) for the Chrome transfer fixes, raw-capture desktop view, built-in Cloudflare/GitHub context clients, 203 Python tests, 28 extension tests and current Windows build checks. The older readiness scores below describe the historical 1.5.0 audit and are not updated scores for 1.6.0.

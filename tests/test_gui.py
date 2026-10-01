@@ -2,6 +2,7 @@
 from __future__ import annotations
 import tempfile
 import tkinter as tk
+from tkinter import ttk
 import unittest
 import time
 import threading
@@ -14,6 +15,189 @@ from owlthread.gui.feed_card import FeedCard, CaptureCard
 
 
 class TestDesktopGUI(unittest.TestCase):
+    def test_rounded_buttons_and_section_selector_keep_keyboard_behavior(self) -> None:
+        from owlthread.gui.theme import button
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"rounded-controls.db")) as db:
+            app=OwlThreadApp(db=db,auto_start_engine=False)
+            calls=[]
+            try:
+                self._drain(app)
+                control=button(app.page,"Keyboard action",lambda:calls.append(True))
+                control.pack();app.update()
+                control.focus_force();app.update()
+                control.event_generate("<Return>");app.update()
+                self.assertEqual(calls,[True])
+                control.configure(state="disabled")
+                control.event_generate("<Return>");app.update()
+                self.assertEqual(calls,[True],"Disabled rounded buttons must not perform an action")
+                app.show_view("settings");app.update()
+                tabs=app.settings_tabs
+                tabs._buttons[0].focus_force();app.update()
+                tabs._buttons[0].event_generate("<Right>");app.update()
+                self.assertEqual(tabs.select(),str(tabs._panes[1]))
+                self.assertTrue(app._scrolls[1].canvas.winfo_ismapped())
+                self.assertFalse(app._scrolls[0].canvas.winfo_ismapped())
+                tabs._buttons[1].event_generate("<Left>");app.update()
+                self.assertEqual(tabs.select(),str(tabs._panes[0]))
+            finally: self._drain(app);app.destroy()
+
+    def test_note_drafts_survive_navigation_and_stay_with_their_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"draft-navigation.db")) as db:
+            app=OwlThreadApp(db=db,auto_start_engine=False);app.withdraw()
+            try:
+                self._drain(app);app.show_view("capture")
+                app.note.insert("1.0","General project draft")
+                app.show_view("feed");app.show_view("capture")
+                self.assertEqual(app.note.get("1.0","end-1c"),"General project draft")
+                app.project.set("Second project");app._project_changed();self._drain(app)
+                self.assertEqual(app.note.get("1.0","end-1c"),"")
+                app.note.insert("1.0","Second project draft")
+                app.project.set("General");app._project_changed();self._drain(app)
+                self.assertEqual(app.note.get("1.0","end-1c"),"General project draft")
+                app._save_capture();app._save_capture();self._drain(app)
+                self.assertEqual(db.pending_count(),1,"Repeated save must not duplicate a capture")
+                app.show_view("feed");app.show_view("capture")
+                self.assertEqual(app.note.get("1.0","end-1c"),"")
+                app.project.set("Second project");app._project_changed();self._drain(app)
+                self.assertEqual(app.note.get("1.0","end-1c"),"Second project draft")
+            finally: self._drain(app);app.destroy()
+
+    def test_settings_drafts_and_search_query_survive_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"navigation.db")) as db:
+            app=OwlThreadApp(db=db,auto_start_engine=False);app.withdraw()
+            try:
+                self._drain(app);app.show_view("settings")
+                original=db.get_setting("llm_model","")
+                app.setting_vars["llm_model"].set("draft-model")
+                app.capture_options["ide_capture_enabled"].set(True)
+                app.show_view("search");self._drain(app)
+                app.search_query.set("a query without matches");app._search();self._drain(app)
+                self.assertEqual(app.search_notice.cget("text"),"0 results")
+                self.assertTrue(any(isinstance(w,tk.Label) and w.cget("text")=="No matching memories" for w in app.search_results.winfo_children()))
+                app.show_view("settings")
+                self.assertEqual(app.setting_vars["llm_model"].get(),"draft-model")
+                self.assertTrue(app.capture_options["ide_capture_enabled"].get())
+                self.assertEqual(db.get_setting("llm_model",""),original,"Navigating must not save settings")
+                app.show_view("search");self._drain(app)
+                self.assertEqual(app.search_query.get(),"a query without matches")
+            finally: self._drain(app);app.destroy()
+
+    def test_minimum_window_keeps_capture_and_settings_actions_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"actions.db")) as db:
+            app=OwlThreadApp(db=db,auto_start_engine=False)
+            app.geometry("920x650+20+20")
+            try:
+                self._drain(app);app.show_view("capture");app.update_idletasks()
+                save=app.save_capture_button
+                self.assertTrue(save.winfo_ismapped())
+                self.assertGreaterEqual(save.winfo_height(),save.winfo_reqheight())
+                self.assertLessEqual(save.winfo_rooty()+save.winfo_height(),app.footer.winfo_rooty())
+                for nav in app.nav.values():
+                    self.assertGreaterEqual(nav.winfo_height(),nav.winfo_reqheight())
+                app._save_capture()
+                self.assertIn("Write or paste",app.footer.cget("text"))
+                app.note.insert("1.0","Keep the complete note when using a shortcut")
+                app.note.mark_set("insert","1.0")
+                app.note.focus_force();app.update()
+                app.note.event_generate("<Control-k>");self._drain(app)
+                self.assertEqual(app.current_view,"search")
+                app._shortcut("capture")
+                self.assertEqual(app.note.get("1.0","end-1c"),"Keep the complete note when using a shortcut")
+                app.show_view("settings");app.update_idletasks()
+                for index in range(4):
+                    app.settings_tabs.select(index);app.update_idletasks()
+                    scroll=app._scrolls[index]
+                    self.assertTrue(scroll.canvas.winfo_ismapped())
+                    self.assertGreater(scroll.canvas.winfo_height(),100)
+            finally: self._drain(app);app.destroy()
+
+    def test_other_integrations_are_coming_soon_without_setup_controls(self) -> None:
+        from owlthread.integrations.catalog import list_catalog
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"coming-soon.db")) as db:
+            pid=db.get_or_create_project("General")
+            previous='{"enabled":true,"scopes":["messages.read"],"project_id":'+str(pid)+'}'
+            db.set_setting("integration_config:gmail",previous)
+            app=OwlThreadApp(db=db,auto_start_engine=False);app.withdraw()
+            def descendants(widget: tk.Misc) -> list[tk.Misc]:
+                children=widget.winfo_children()
+                return children+[nested for child in children for nested in descendants(child)]
+            try:
+                self._drain(app);app.show_view("integrations");app.update_idletasks()
+                cards=[widget for widget in app._scrolls[0].content.winfo_children() if isinstance(widget,tk.Frame)]
+                for spec in list_catalog():
+                    if spec.integration_id in {"cloudflare","github"}: continue
+                    with self.subTest(integration=spec.integration_id):
+                        matching=[card for card in cards if any(isinstance(widget,tk.Label) and widget.cget("text")==spec.display_name for widget in descendants(card))]
+                        self.assertEqual(len(matching),1)
+                        widgets=descendants(matching[0])
+                        self.assertTrue(any(isinstance(widget,tk.Label) and widget.cget("text")=="Coming soon" for widget in widgets))
+                        self.assertFalse(any(isinstance(widget,(tk.Button,ttk.Button,tk.Entry,ttk.Entry,ttk.Combobox,tk.Checkbutton)) for widget in widgets))
+                self.assertEqual(db.get_setting("integration_config:gmail"),previous,"Existing grants must remain untouched")
+                self.assertEqual(set(app._browser_fields),{"cloudflare","github"})
+            finally: self._drain(app);app.destroy()
+
+    def test_browser_connect_is_primary_and_token_setup_is_collapsed(self) -> None:
+        with patch("owlthread.integrations.browser_login.GITHUB_CLIENT_ID",""), patch.dict("os.environ",{"OWLTHREAD_GITHUB_CLIENT_ID":""}), tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"browser-ui.db")) as db:
+            app=OwlThreadApp(db=db,auto_start_engine=False)
+            app.withdraw()
+            try:
+                self._drain(app);app.show_view("integrations");app.update_idletasks()
+                fields=app._browser_fields["cloudflare"]
+                self.assertEqual(fields["connect"].cget("text"),"Sign in with Cloudflare")
+                self.assertEqual(fields["connect"].cget("state"),"normal")
+                self.assertFalse(app._connector_advanced_open.get("cloudflare",False))
+                self.assertFalse(app.integration_fields["cloudflare"]["token_widget"].winfo_ismapped())
+                self.assertEqual(app._browser_fields["github"]["connect"].cget("state"),"disabled")
+            finally: self._drain(app);app.destroy()
+
+    def test_browser_accounts_with_duplicate_names_remain_selectable(self) -> None:
+        import json
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"duplicate-resource-ui.db")) as db:
+            account_a,account_b,account_c="a"*32,"b"*32,"c"*32
+            db.set_setting("integration_credential:cloudflare","synthetic-oauth-credential")
+            def save_resources(resources: list[dict]) -> None:
+                db.set_setting("integration_auth:cloudflare",json.dumps({"method":"browser","label":"Fixture","resources":resources}))
+            save_resources([{"id":account_a,"label":"Team","options":{"account_id":account_a}}])
+            app=OwlThreadApp(db=db,auto_start_engine=False);app.withdraw()
+            try:
+                self._drain(app);app.show_view("integrations")
+                fields=app._browser_fields["cloudflare"]
+                self.assertEqual(fields["choice"].get(),"Team")
+                save_resources([
+                    {"id":account_a,"label":"Team","options":{"account_id":account_a}},
+                    {"id":account_b,"label":"Team","options":{"account_id":account_b}},
+                    {"id":account_c,"label":f"Team ({account_a})","options":{"account_id":account_c}},
+                ])
+                app._poll_browser_logins();app.update_idletasks()
+                choices=fields["resource_map"]
+                self.assertEqual(len(choices),3)
+                self.assertEqual(set(choices.values()),{account_a,account_b,account_c})
+                self.assertEqual(choices[fields["choice"].get()],account_a,"Discovery must preserve the selected account by ID")
+                self.assertEqual(tuple(fields["resources"].cget("values")),tuple(choices))
+                for choice,account_id in choices.items():
+                    fields["choice"].set(choice)
+                    with patch.object(app.login_service,"select",return_value={"ok":True,"imported_count":0}) as select:
+                        app._import_browser_context("cloudflare");self._drain(app)
+                        select.assert_called_once_with("cloudflare",account_id)
+            finally: self._drain(app);app.destroy()
+
+    def test_browser_resources_update_without_erasing_selection_or_drafts(self) -> None:
+        import json
+        with tempfile.TemporaryDirectory() as directory, Database(str(Path(directory)/"resource-ui.db")) as db:
+            db.set_setting("integration_credential:cloudflare","synthetic-oauth-credential")
+            db.set_setting("integration_auth:cloudflare",json.dumps({"method":"browser","label":"Fixture","resources":[{"id":"a"*32,"label":"A","options":{"account_id":"a"*32}},{"id":"b"*32,"label":"B","options":{"account_id":"b"*32}}]}))
+            app=OwlThreadApp(db=db,auto_start_engine=False);app.withdraw()
+            try:
+                self._drain(app);app.show_view("integrations")
+                fields=app._browser_fields["cloudflare"]
+                fields["choice"].set("B");app.integration_fields["cloudflare"]["account_id"].set("manual draft")
+                app._poll_browser_logins();app.update_idletasks()
+                self.assertEqual(fields["choice"].get(),"B")
+                self.assertEqual(app.integration_fields["cloudflare"]["account_id"].get(),"manual draft")
+                self.assertEqual(fields["import"].cget("state"),"normal")
+                app.login_service.close()
+            finally: self._drain(app);app.destroy()
+
     def tearDown(self) -> None:
         # Collect closed Tk widget/variable cycles on the creating thread.
         gc.collect()
